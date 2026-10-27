@@ -170,7 +170,7 @@ public class AnchorSelector {
     // its own - a literal or a query parameter - can drive a seek; anything else (a nested parameter
     // field, a reference to another variable) is left to the Filter above the anchor, which evaluates
     // it with a full row in hand. Seeking with an unresolved expression would find nothing at all.
-    final Map<String, Object> allPredicates = new HashMap<>();
+    final Map<String, Object> allPredicates = new LinkedHashMap<>();
     if (properties != null)
       for (final Map.Entry<String, Object> property : properties.entrySet())
         if (isStaticallySeekable(property.getValue()))
@@ -190,8 +190,12 @@ public class AnchorSelector {
     final Map<String, SeekValues> orBranches = extractOrSeekBranches(variable, plan);
 
     if (!allPredicates.isEmpty() || !inListPredicates.isEmpty()) {
-      // Look for indexed properties with equality predicates
+      // Look for indexed properties with equality predicates. Every indexed equality and IN-list on the node is
+      // costed and the cheapest one anchors the pattern (issue #10775): the first indexed property found could be a
+      // NOTUNIQUE index while another predicate on the same node had a UNIQUE one. On an exact tie the earlier
+      // candidate wins - equalities before IN-lists, written order within each.
       final List<IndexStatistics> indexes = statisticsProvider.getIndexesForType(label);
+      AnchorSelection best = null;
 
       for (final Map.Entry<String, Object> property : allPredicates.entrySet()) {
         final String propertyName = property.getKey();
@@ -201,7 +205,7 @@ public class AnchorSelector {
         final IndexStatistics indexStats = findEqualitySeekIndex(indexes, propertyName, allPredicates.keySet());
 
         if (indexStats != null) {
-          // INDEX SEEK - PREFERRED (lowest cost)
+          // INDEX SEEK candidate.
           // On a composite index the other equality predicates extend the seek key as far as they
           // reach without a gap; a key covering every column resolves a single entry, a shorter one
           // narrows the prefix range that has to be scanned (issue #5444).
@@ -213,7 +217,7 @@ public class AnchorSelector {
           final long estimatedRows = (long) (typeCount * selectivity);
           final double cost = costModel.estimateIndexSeekCost(label, propertyName, selectivity);
 
-          return new AnchorSelection(
+          final AnchorSelection candidate = new AnchorSelection(
               variable,
               node,
               true, // useIndex
@@ -224,10 +228,13 @@ public class AnchorSelector {
               cost,
               estimatedRows
           );
+          if (best == null || candidate.getEstimatedCost() < best.getEstimatedCost())
+            best = candidate;
         }
       }
 
-      // IN-list over an indexed property → multi-value index seek (one seek per list value).
+      // IN-list over an indexed property → multi-value index seek (one seek per list value), costed against the
+      // equality candidates above.
       for (final Map.Entry<String, InListOperand> property : inListPredicates.entrySet()) {
         final String propertyName = property.getKey();
         final List<Expression> values = property.getValue().elements();
@@ -245,7 +252,7 @@ public class AnchorSelector {
           final double cost = nValues * costModel.estimateIndexSeekCost(label, propertyName, perSeekSelectivity);
 
           final InListValues inListValues = new InListValues(values, Collections.emptySet(), wholeRightSides(property.getValue()));
-          return new AnchorSelection(
+          final AnchorSelection candidate = new AnchorSelection(
               variable,
               node,
               true, // useIndex
@@ -256,8 +263,13 @@ public class AnchorSelector {
               cost,
               estimatedRows
           );
+          if (best == null || candidate.getEstimatedCost() < best.getEstimatedCost())
+            best = candidate;
         }
       }
+
+      if (best != null)
+        return best;
     }
 
     if (orBranches != null) {
@@ -578,7 +590,7 @@ public class AnchorSelector {
    * @return map of property names to their equality values
    */
   private Map<String, Object> extractEqualityPredicates(final String variable, final LogicalPlan plan) {
-    final Map<String, Object> predicates = new HashMap<>();
+    final Map<String, Object> predicates = new LinkedHashMap<>();
 
     if (plan.getWhereFilters() == null || plan.getWhereFilters().isEmpty()) {
       return predicates;
@@ -658,7 +670,7 @@ public class AnchorSelector {
    * @return map of property names to the list of value expressions to seek
    */
   private Map<String, InListOperand> extractInListPredicates(final String variable, final LogicalPlan plan) {
-    final Map<String, InListOperand> predicates = new HashMap<>();
+    final Map<String, InListOperand> predicates = new LinkedHashMap<>();
 
     if (plan.getWhereFilters() == null || plan.getWhereFilters().isEmpty())
       return predicates;

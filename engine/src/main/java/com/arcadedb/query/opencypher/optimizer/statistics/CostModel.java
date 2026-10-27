@@ -79,6 +79,10 @@ public class CostModel {
 
   /**
    * Estimates the cost of an index seek operation.
+   * <p>
+   * The row estimate is at least one: a seek that finds nothing still pays the lookup, and rounding a small type's
+   * estimate down to zero would price a non-unique seek below a unique one and make the planner prefer the
+   * non-unique index on that type (issue #10775).
    *
    * @param typeName the type name
    * @param propertyName the property name
@@ -93,7 +97,7 @@ public class CostModel {
     }
 
     final long typeCardinality = statistics.getCardinality(typeName);
-    final long estimatedRows = (long) (typeCardinality * selectivity);
+    final long estimatedRows = Math.max(1, (long) (typeCardinality * selectivity));
 
     return INDEX_SEEK_COST + (estimatedRows * INDEX_LOOKUP_COST_PER_ROW);
   }

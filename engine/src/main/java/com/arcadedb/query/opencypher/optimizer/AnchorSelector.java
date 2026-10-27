@@ -185,26 +185,25 @@ public class AnchorSelector {
     final Map<String, InListOperand> inListPredicates = extractInListPredicates(variable, plan);
 
     // An OR whose every disjunct is an equality or IN-list on an indexed property is a union of index seeks (issue #8723).
-    // Over one property that is the IN-list seek above; over several it is a seek per property, tried further down. The
-    // whole WHERE is still evaluated above the anchor, so a seek that finds a superset of the matching rows is safe.
+    // Over one property that is the IN-list seek below; over several it is a seek per property. The whole WHERE is still
+    // evaluated above the anchor, so a seek that finds a superset of the matching rows is safe.
     final Map<String, SeekValues> orBranches = extractOrSeekBranches(variable, plan);
 
+    // Every index seek the node allows is costed - each index on each equality, each IN-list, the OR seek - and the
+    // cheapest one anchors the pattern (issue #10775): the first indexed property found could be a NOTUNIQUE index
+    // while another predicate on the same node, or another index on the same property, had a UNIQUE one. Ties go to
+    // a unique index resolved in full, then to the earlier candidate: equalities, IN-lists, the OR seek, in written
+    // order within each.
+    AnchorSelection best = null;
+
     if (!allPredicates.isEmpty() || !inListPredicates.isEmpty()) {
-      // Look for indexed properties with equality predicates. Every indexed equality and IN-list on the node is
-      // costed and the cheapest one anchors the pattern (issue #10775): the first indexed property found could be a
-      // NOTUNIQUE index while another predicate on the same node had a UNIQUE one. On an exact tie the earlier
-      // candidate wins - equalities before IN-lists, written order within each.
       final List<IndexStatistics> indexes = statisticsProvider.getIndexesForType(label);
-      AnchorSelection best = null;
 
       for (final Map.Entry<String, Object> property : allPredicates.entrySet()) {
         final String propertyName = property.getKey();
         final Object propertyValue = property.getValue();
 
-        // Check if there's an index on this property
-        final IndexStatistics indexStats = findEqualitySeekIndex(indexes, propertyName, allPredicates.keySet());
-
-        if (indexStats != null) {
+        for (final IndexStatistics indexStats : findEqualitySeekIndexes(indexes, propertyName, allPredicates.keySet())) {
           // INDEX SEEK candidate.
           // On a composite index the other equality predicates extend the seek key as far as they
           // reach without a gap; a key covering every column resolves a single entry, a shorter one
@@ -217,7 +216,7 @@ public class AnchorSelector {
           final long estimatedRows = (long) (typeCount * selectivity);
           final double cost = costModel.estimateIndexSeekCost(label, propertyName, selectivity);
 
-          final AnchorSelection candidate = new AnchorSelection(
+          best = cheaper(best, new AnchorSelection(
               variable,
               node,
               true, // useIndex
@@ -227,21 +226,16 @@ public class AnchorSelector {
               keyValues,
               cost,
               estimatedRows
-          );
-          if (best == null || candidate.getEstimatedCost() < best.getEstimatedCost())
-            best = candidate;
+          ));
         }
       }
 
-      // IN-list over an indexed property → multi-value index seek (one seek per list value), costed against the
-      // equality candidates above.
+      // IN-list over an indexed property → multi-value index seek (one seek per list value).
       for (final Map.Entry<String, InListOperand> property : inListPredicates.entrySet()) {
         final String propertyName = property.getKey();
         final List<Expression> values = property.getValue().elements();
 
-        final IndexStatistics indexStats = findEqualitySeekIndex(indexes, propertyName, allPredicates.keySet());
-
-        if (indexStats != null) {
+        for (final IndexStatistics indexStats : findEqualitySeekIndexes(indexes, propertyName, allPredicates.keySet())) {
           final int nValues = Math.max(1, values.size());
           // Per-seek selectivity: a unique index returns ~1 row per value, a non-unique one ~10%.
           final double perSeekSelectivity = indexStats.isUnique() ? 1.0 / Math.max(1, typeCount) : 0.1;
@@ -252,7 +246,7 @@ public class AnchorSelector {
           final double cost = nValues * costModel.estimateIndexSeekCost(label, propertyName, perSeekSelectivity);
 
           final InListValues inListValues = new InListValues(values, Collections.emptySet(), wholeRightSides(property.getValue()));
-          final AnchorSelection candidate = new AnchorSelection(
+          best = cheaper(best, new AnchorSelection(
               variable,
               node,
               true, // useIndex
@@ -262,14 +256,9 @@ public class AnchorSelector {
               collectKeyPrefixValues(indexStats, allPredicates, inListValues),
               cost,
               estimatedRows
-          );
-          if (best == null || candidate.getEstimatedCost() < best.getEstimatedCost())
-            best = candidate;
+          ));
         }
       }
-
-      if (best != null)
-        return best;
     }
 
     if (orBranches != null) {
@@ -277,8 +266,11 @@ public class AnchorSelector {
           trySingleOrSeek(node, label, typeCount, orBranches, allPredicates) :
           tryUnionIndexSeek(node, label, typeCount, orBranches);
       if (seek != null)
-        return seek;
+        best = cheaper(best, seek);
     }
+
+    if (best != null)
+      return best;
 
     if (!allPredicates.isEmpty()) {
       // FILTERED SCAN - ACCEPTABLE (no index available)
@@ -487,6 +479,24 @@ public class AnchorSelector {
   }
 
   /**
+   * The cheaper of the anchor found so far and a new candidate (issue #10775). On equal cost a unique index whose
+   * key the seek resolves in full is a point lookup and wins over anything else; otherwise the earlier candidate
+   * stays, which keeps the choice deterministic in the written order of the predicates.
+   */
+  private static AnchorSelection cheaper(final AnchorSelection best, final AnchorSelection candidate) {
+    if (best == null || candidate.getEstimatedCost() < best.getEstimatedCost())
+      return candidate;
+    if (candidate.getEstimatedCost() == best.getEstimatedCost() && isUniqueWholeKeySeek(candidate) && !isUniqueWholeKeySeek(best))
+      return candidate;
+    return best;
+  }
+
+  private static boolean isUniqueWholeKeySeek(final AnchorSelection selection) {
+    final IndexStatistics index = selection.getIndex();
+    return index != null && index.isUnique() && selection.getKeyValues().size() == index.getPropertyNames().size();
+  }
+
+  /**
    * Same as {@link #findIndexForProperty(List, String, boolean)} for an equality seek, whose key is built from {@code pinned}, the
    * properties the query holds equal to a value. A hash index answers an exact key only, so a composite one whose key the query
    * cannot fill is skipped: the seek would have to read it as a prefix range (issue #9236).
@@ -494,19 +504,27 @@ public class AnchorSelector {
    * @param indexes      list of available indexes
    * @param propertyName property to search for
    * @param pinned       the other properties the query holds equal to a value; {@code propertyName} itself counts as pinned
-   * @return index statistics if found, null otherwise
+   * @return every usable index, in schema order; empty when there is none
    */
-  private IndexStatistics findEqualitySeekIndex(final List<IndexStatistics> indexes, final String propertyName,
+  private List<IndexStatistics> findEqualitySeekIndexes(final List<IndexStatistics> indexes, final String propertyName,
       final Set<String> pinned) {
     if (indexes == null)
-      return null;
+      return Collections.emptyList();
+    final List<IndexStatistics> found = new ArrayList<>(1);
     for (final IndexStatistics index : indexes) {
       if (!index.isOrdered() && !fillsKey(index, propertyName, pinned))
         continue;
       if (leadsWithProperty(index, propertyName))
-        return index;
+        found.add(index);
     }
-    return null;
+    return found;
+  }
+
+  /** The first of {@link #findEqualitySeekIndexes}, or null when there is none. */
+  private IndexStatistics findEqualitySeekIndex(final List<IndexStatistics> indexes, final String propertyName,
+      final Set<String> pinned) {
+    final List<IndexStatistics> found = findEqualitySeekIndexes(indexes, propertyName, pinned);
+    return found.isEmpty() ? null : found.get(0);
   }
 
   /** Same as {@link #findIndexForProperty(List, String, boolean)}, skipping the indexes that cannot be read in key order (a hash index). */

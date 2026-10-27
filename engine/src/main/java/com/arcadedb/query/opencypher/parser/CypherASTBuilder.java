@@ -89,7 +89,6 @@ import org.antlr.v4.runtime.tree.TerminalNode;
 
 import java.text.Normalizer;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -2451,7 +2450,8 @@ public class CypherASTBuilder extends Cypher25ParserBaseVisitor<Object> {
   }
 
   public Map<String, Object> visitMap(final Cypher25Parser.MapContext ctx) {
-    final Map<String, Object> map = new HashMap<>();
+    // Written order is kept: the planner breaks a tie between equally cheap indexed properties by it (issue #10775)
+    final Map<String, Object> map = new LinkedHashMap<>();
 
     final List<Cypher25Parser.PropertyKeyNameContext> keys = ctx.propertyKeyName();
     final List<Cypher25Parser.ExpressionContext> values = ctx.expression();

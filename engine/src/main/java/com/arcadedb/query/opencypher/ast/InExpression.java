@@ -80,8 +80,11 @@ public class InExpression implements BooleanExpression {
    */
   private volatile ListMemo listMemo;
 
-  /** The identity hash of the last list {@link #lookupFor} was asked about and did not find in the memo; a heuristic, racy on purpose. */
-  private int lastSeenIdentity;
+  /**
+   * The identity hash of the last list {@link #lookupFor} was asked about and did not find in the memo; a heuristic, racy on
+   * purpose. Volatile like every mutable field of an expression a parallel scan may evaluate (ParallelSafeExpressionsStateTest).
+   */
+  private volatile int lastSeenIdentity;
 
   // Membership is equality against each element, so the element check reuses the = operator's
   // comparator (issue #5293) rather than a second, drifting implementation. Held per AST node so no

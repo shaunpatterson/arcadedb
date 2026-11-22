@@ -806,7 +806,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
       // -9223372036854775808: only the negated literal fits a long
       if (negative)
         try {
-          return Long.parseLong("-" + (text.endsWith("L") || text.endsWith("l") ? text.substring(0, text.length() - 1) : text));
+          return parseNegatedLongLiteral(text);
         } catch (final NumberFormatException ignored) {
           // reported below
         }
@@ -1606,7 +1606,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
       // Extract the bucket number from the token (after the colon)
       final String tokenText = ctx.BUCKET_NUMBER_IDENTIFIER().getText();
       final String bucketNumStr = tokenText.substring(7); // Remove "bucket:" prefix
-      item.bucketId = new PInteger().setValue(Integer.parseInt(bucketNumStr));
+      item.bucketId = new PInteger().setValue(parseIntLiteral(bucketNumStr));
       return item;
     }
 
@@ -2244,7 +2244,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
       // BUCKET:123 format
       final String text = ctx.BUCKET_NUMBER_IDENTIFIER().getText();
       final String bucketNumberStr = text.substring("bucket:".length());
-      bucket.bucketNumber = Integer.parseInt(bucketNumberStr);
+      bucket.bucketNumber = parseIntLiteral(bucketNumberStr);
     }
 
     fromItem.bucket = bucket;
@@ -3432,26 +3432,19 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
     if (!(baseCtx.baseExpression() instanceof final SQLParser.IntegerLiteralContext intCtx))
       return null;
 
-    final String originalText = intCtx.INTEGER_LITERAL().getText();
-    final String text = (originalText.endsWith("L") || originalText.endsWith("l"))
-        ? originalText.substring(0, originalText.length() - 1) : originalText;
-
-    for (int i = 0; i < text.length(); i++)
-      if (!Character.isDigit(text.charAt(i)))
-        return null; // hex/octal-shaped: not the plain-decimal shape we fold here
-
+    final String text = intCtx.INTEGER_LITERAL().getText();
     try {
-      Long.parseLong(text);
+      parseIntegerLiteral(text);
       return null; // magnitude fits on its own: let the existing 0 - X handling run as before
     } catch (final NumberFormatException magnitudeOverflow) {
       // only Long.MIN_VALUE's magnitude can still be represented once the sign is folded in;
       // anything larger is a genuine overflow and keeps raising the original error
       try {
         final BaseExpression baseExpr = new BaseExpression();
-        baseExpr.number = new PInteger().setValue(Long.parseLong("-" + text));
+        baseExpr.number = new PInteger().setValue(parseNegatedLongLiteral(text));
         return baseExpr;
       } catch (final NumberFormatException stillInvalid) {
-        throw new CommandSQLParsingException("Invalid integer: " + originalText);
+        throw new CommandSQLParsingException("Invalid integer: " + text);
       }
     }
   }
@@ -3583,15 +3576,15 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
   }
 
   /**
-   * Parses an {@code INTEGER_LITERAL} token: decimal or hexadecimal ({@code 0xFF}), with an optional {@code L} suffix. A value
-   * above {@code Integer.MAX_VALUE} (hexadecimal included, so {@code 0xFFFFFFFF} is 4294967295 and not -1) is a long.
+   * Parses an {@code INTEGER_LITERAL} token: decimal, hexadecimal ({@code 0xFF}) or octal (a leading {@code 0} followed by
+   * more digits: {@code 010} is 8, issue #12082), with an optional {@code L} suffix. A value above {@code Integer.MAX_VALUE}
+   * (hexadecimal and octal included, so {@code 0xFFFFFFFF} is 4294967295 and not -1) is a long.
    */
   static Number parseIntegerLiteral(final String text) {
     final boolean isLong = text.endsWith("L") || text.endsWith("l");
     final String digits = isLong ? text.substring(0, text.length() - 1) : text;
-    final boolean isHex = digits.length() > 2 && digits.charAt(0) == '0' && (digits.charAt(1) == 'x' || digits.charAt(1) == 'X');
-    final String body = isHex ? digits.substring(2) : digits;
-    final int radix = isHex ? 16 : 10;
+    final int radix = integerLiteralRadix(digits);
+    final String body = radix == 16 ? digits.substring(2) : digits;
     if (isLong)
       return Long.parseLong(body, radix);
     try {
@@ -3600,6 +3593,44 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
       // If it's too large for int, try long
       return Long.parseLong(body, radix);
     }
+  }
+
+  /**
+   * The value of a directly negated {@code INTEGER_LITERAL} whose magnitude does not fit a long on its own: only the magnitude
+   * of {@code Long.MIN_VALUE} (in any radix) can still be represented once the sign is folded in, anything larger raises
+   * {@link NumberFormatException}.
+   */
+  static long parseNegatedLongLiteral(final String text) {
+    final String digits = text.endsWith("L") || text.endsWith("l") ? text.substring(0, text.length() - 1) : text;
+    final int radix = integerLiteralRadix(digits);
+    return Long.parseLong("-" + (radix == 16 ? digits.substring(2) : digits), radix);
+  }
+
+  /**
+   * The value of an {@code INTEGER_LITERAL} written where an int is expected (a count, a size, a bucket id, a range bound),
+   * optionally preceded by a minus sign, read like {@link #parseIntegerLiteral}: {@link NumberFormatException} when it does
+   * not fit an int.
+   */
+  static int parseIntLiteral(final String text) {
+    final boolean negative = text.startsWith("-");
+    final long magnitude = parseIntegerLiteral(negative ? text.substring(1) : text).longValue();
+    final long value = negative ? -magnitude : magnitude;
+    if (value != (int) value)
+      throw new NumberFormatException("Integer literal out of int range: " + text);
+    return (int) value;
+  }
+
+  /** The value of an {@code INTEGER_LITERAL} written where a long is expected, read like {@link #parseIntegerLiteral}. */
+  static long parseLongLiteral(final String text) {
+    return parseIntegerLiteral(text).longValue();
+  }
+
+  private static int integerLiteralRadix(final String digits) {
+    if (digits.length() > 1 && digits.charAt(0) == '0') {
+      final char second = digits.charAt(1);
+      return second == 'x' || second == 'X' ? 16 : 8;
+    }
+    return 10;
   }
 
   /**
@@ -4686,13 +4717,13 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
       return param;
     } else if (ctx.INTEGER_LITERAL() != null) {
       // Positional parameter: $1, $2, etc.
-      final int paramNum = Integer.parseInt(ctx.INTEGER_LITERAL().getText());
+      final int paramNum = parseIntLiteral(ctx.INTEGER_LITERAL().getText());
       final PositionalParameter param = new PositionalParameter();
       param.paramNumber = paramNum;
       return param;
     } else if (ctx.COLON() != null && ctx.INTEGER_LITERAL() != null) {
       // Named parameter: :1, :2, etc. (numeric named params)
-      final int paramNum = Integer.parseInt(ctx.INTEGER_LITERAL().getText());
+      final int paramNum = parseIntLiteral(ctx.INTEGER_LITERAL().getText());
       final NamedParameter param = new NamedParameter();
       param.paramName = String.valueOf(paramNum);
       param.paramNumber = paramNum;
@@ -4782,7 +4813,9 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
   }
 
   /**
-   * Visit integer (positive or negative integer for RIDs).
+   * Visit integer (positive or negative integer for RIDs). The parts of a RID are read in decimal, as the RID's own text form
+   * ({@code #12:10}, {@code new RID("#12:010")}) is: a record address, not a numeric literal, so {@code #12:010} is
+   * {@code #12:10} and not the octal {@code #12:8} (issue #12082).
    */
   @Override
   public PInteger visitInteger(final SQLParser.IntegerContext ctx) {
@@ -5670,7 +5703,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
       // TO bucket:123 (lexed as a single BUCKET_NUMBER_IDENTIFIER token)
       final String text = moveCtx.BUCKET_NUMBER_IDENTIFIER().getText();
       final Bucket bucket = new Bucket();
-      bucket.bucketNumber = Integer.parseInt(text.substring("bucket:".length()));
+      bucket.bucketNumber = parseIntLiteral(text.substring("bucket:".length()));
       stmt.targetBucket = bucket;
     } else if (moveCtx.BUCKET() != null) {
       // TO BUCKET : bucketname (separated tokens, e.g. with spaces around the colon)
@@ -5712,7 +5745,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
     if (ctx.INTEGER_LITERAL() != null) {
       // Bucket ID (integer)
       final PInteger pInt = new PInteger();
-      pInt.setValue(Integer.parseInt(ctx.INTEGER_LITERAL().getText()));
+      pInt.setValue(parseIntLiteral(ctx.INTEGER_LITERAL().getText()));
       bucketId.bucketId = pInt;
     } else if (ctx.identifier() != null) {
       // Bucket name (identifier)
@@ -5727,7 +5760,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
       final String text = ctx.BUCKET_NUMBER_IDENTIFIER().getText();
       final String bucketNumberStr = text.substring("bucket:".length());
       final PInteger pInt = new PInteger();
-      pInt.setValue(Integer.parseInt(bucketNumberStr));
+      pInt.setValue(parseIntLiteral(bucketNumberStr));
       bucketId.bucketId = pInt;
     } else if (ctx.BUCKET_NAMED_PARAM() != null) {
       // bucket::paramName format
@@ -5787,7 +5820,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
         if (foundBuckets && child instanceof final TerminalNode termNode) {
           if (termNode.getSymbol().getType() == SQLParser.INTEGER_LITERAL) {
             final PInteger pInt = new PInteger();
-            pInt.setValue(Integer.parseInt(termNode.getText()));
+            pInt.setValue(parseIntLiteral(termNode.getText()));
             stmt.totalBucketNo = pInt;
             break;
           }
@@ -5809,7 +5842,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
         if (foundPageSize && child instanceof final TerminalNode termNode) {
           if (termNode.getSymbol().getType() == SQLParser.INTEGER_LITERAL) {
             final PInteger pInt = new PInteger();
-            pInt.setValue(Integer.parseInt(termNode.getText()));
+            pInt.setValue(parseIntLiteral(termNode.getText()));
             stmt.pageSize = pInt;
             break;
           }
@@ -5867,7 +5900,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
         if (foundBuckets && child instanceof final TerminalNode termNode) {
           if (termNode.getSymbol().getType() == SQLParser.INTEGER_LITERAL) {
             final PInteger pInt = new PInteger();
-            pInt.setValue(Integer.parseInt(termNode.getText()));
+            pInt.setValue(parseIntLiteral(termNode.getText()));
             stmt.totalBucketNo = pInt;
             break;
           }
@@ -5889,7 +5922,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
         if (foundPageSize && child instanceof final TerminalNode termNode) {
           if (termNode.getSymbol().getType() == SQLParser.INTEGER_LITERAL) {
             final PInteger pInt = new PInteger();
-            pInt.setValue(Integer.parseInt(termNode.getText()));
+            pInt.setValue(parseIntLiteral(termNode.getText()));
             stmt.pageSize = pInt;
             break;
           }
@@ -5954,7 +5987,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
         if (foundBuckets && child instanceof final TerminalNode termNode) {
           if (termNode.getSymbol().getType() == SQLParser.INTEGER_LITERAL) {
             final PInteger pInt = new PInteger();
-            pInt.setValue(Integer.parseInt(termNode.getText()));
+            pInt.setValue(parseIntLiteral(termNode.getText()));
             stmt.totalBucketNo = pInt;
             break;
           }
@@ -5976,7 +6009,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
         if (foundPageSize && child instanceof final TerminalNode termNode) {
           if (termNode.getSymbol().getType() == SQLParser.INTEGER_LITERAL) {
             final PInteger pInt = new PInteger();
-            pInt.setValue(Integer.parseInt(termNode.getText()));
+            pInt.setValue(parseIntLiteral(termNode.getText()));
             stmt.pageSize = pInt;
             break;
           }
@@ -6031,7 +6064,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
         final String text = bodyCtx.BUCKET_NUMBER_IDENTIFIER().getText();
         final String bucketNum = text.substring(text.indexOf(':') + 1);
         final Bucket bucket = new Bucket();
-        bucket.bucketNumber = Integer.parseInt(bucketNum);
+        bucket.bucketNumber = parseIntLiteral(bucketNum);
         stmt.targetBucket = bucket;
       } else if (bodyCtx.identifier() != null && !bodyCtx.identifier().isEmpty()) {
         // First identifier is the target type
@@ -6337,9 +6370,9 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
 
       // RETRY n [WAIT ms] (issue #11448): the first INTEGER_LITERAL is the RETRY count, the second the WAIT
       if (bodyCtx.RETRY() != null) {
-        stmt.retry = Integer.parseInt(bodyCtx.INTEGER_LITERAL(0).getText());
+        stmt.retry = parseIntLiteral(bodyCtx.INTEGER_LITERAL(0).getText());
         if (bodyCtx.WAIT() != null)
-          stmt.wait = Long.parseLong(bodyCtx.INTEGER_LITERAL(1).getText());
+          stmt.wait = parseLongLiteral(bodyCtx.INTEGER_LITERAL(1).getText());
       }
 
     } catch (final Exception e) {
@@ -7025,7 +7058,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
     // Bucket name or numeric ID
     if (bodyCtx.INTEGER_LITERAL() != null) {
       stmt.id = new PInteger();
-      stmt.id.setValue(Integer.parseInt(bodyCtx.INTEGER_LITERAL().getText()));
+      stmt.id.setValue(parseIntLiteral(bodyCtx.INTEGER_LITERAL().getText()));
     } else {
       stmt.name = (Identifier) visit(bodyCtx.identifier());
     }
@@ -7115,7 +7148,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
         stmt.refreshMode = "INCREMENTAL";
       else if (refreshCtx.EVERY() != null) {
         stmt.refreshMode = "PERIODIC";
-        stmt.refreshInterval = Integer.parseInt(refreshCtx.INTEGER_LITERAL().getText());
+        stmt.refreshInterval = parseIntLiteral(refreshCtx.INTEGER_LITERAL().getText());
         final SQLParser.MaterializedViewTimeUnitContext unitCtx =
             refreshCtx.materializedViewTimeUnit();
         if (unitCtx.SECOND() != null)
@@ -7128,10 +7161,10 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
     }
 
     if (bodyCtx.bucketCount != null)
-      stmt.buckets = Integer.parseInt(bodyCtx.bucketCount.getText());
+      stmt.buckets = parseIntLiteral(bodyCtx.bucketCount.getText());
 
     if (bodyCtx.pageSize != null)
-      stmt.pageSize = Integer.parseInt(bodyCtx.pageSize.getText());
+      stmt.pageSize = parseIntLiteral(bodyCtx.pageSize.getText());
 
     return stmt;
   }
@@ -7200,7 +7233,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
             if (bodyCtx.children.get(j) instanceof TerminalNode tn2
                 && tn2.getSymbol().getType() == SQLParser.INTEGER_LITERAL) {
               stmt.shards = new PInteger();
-              stmt.shards.setValue(Integer.parseInt(tn2.getText()));
+              stmt.shards.setValue(parseIntLiteral(tn2.getText()));
               break;
             }
           }
@@ -7218,7 +7251,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
           for (int j = i + 1; j < bodyCtx.children.size(); j++) {
             if (bodyCtx.children.get(j) instanceof TerminalNode tn2
                 && tn2.getSymbol().getType() == SQLParser.INTEGER_LITERAL) {
-              retentionValue = Long.parseLong(tn2.getText());
+              retentionValue = parseLongLiteral(tn2.getText());
               break;
             }
           }
@@ -7243,7 +7276,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
           for (int j = i + 1; j < bodyCtx.children.size(); j++) {
             if (bodyCtx.children.get(j) instanceof TerminalNode tn2
                 && tn2.getSymbol().getType() == SQLParser.INTEGER_LITERAL) {
-              compactionValue = Long.parseLong(tn2.getText());
+              compactionValue = parseLongLiteral(tn2.getText());
               break;
             }
           }
@@ -7293,11 +7326,11 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
       final List<SQLParser.DownsamplingTierClauseContext> tierCtxs) {
     final List<DownsamplingTier> tiers = new ArrayList<>(tierCtxs.size());
     for (final SQLParser.DownsamplingTierClauseContext tierCtx : tierCtxs) {
-      final long afterMs = Math.multiplyExact(Long.parseLong(tierCtx.INTEGER_LITERAL(0).getText()), parseTimeUnitMs(tierCtx.tsTimeUnit(0)));
-      final long granMs = Math.multiplyExact(Long.parseLong(tierCtx.INTEGER_LITERAL(1).getText()), parseTimeUnitMs(tierCtx.tsTimeUnit(1)));
+      final long afterMs = Math.multiplyExact(parseLongLiteral(tierCtx.INTEGER_LITERAL(0).getText()), parseTimeUnitMs(tierCtx.tsTimeUnit(0)));
+      final long granMs = Math.multiplyExact(parseLongLiteral(tierCtx.INTEGER_LITERAL(1).getText()), parseTimeUnitMs(tierCtx.tsTimeUnit(1)));
       long offsetMs = 0L;
       if (tierCtx.OFFSET() != null) {
-        offsetMs = Math.multiplyExact(Long.parseLong(tierCtx.INTEGER_LITERAL(2).getText()), parseTimeUnitMs(tierCtx.tsTimeUnit(2)));
+        offsetMs = Math.multiplyExact(parseLongLiteral(tierCtx.INTEGER_LITERAL(2).getText()), parseTimeUnitMs(tierCtx.tsTimeUnit(2)));
         if (tierCtx.MINUS() != null)
           offsetMs = -offsetMs;
       }
@@ -7403,7 +7436,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
       stmt.refreshMode = "INCREMENTAL";
     else if (refreshCtx.EVERY() != null) {
       stmt.refreshMode = "PERIODIC";
-      stmt.refreshInterval = Integer.parseInt(refreshCtx.INTEGER_LITERAL().getText());
+      stmt.refreshInterval = parseIntLiteral(refreshCtx.INTEGER_LITERAL().getText());
       final SQLParser.MaterializedViewTimeUnitContext unitCtx =
           refreshCtx.materializedViewTimeUnit();
       if (unitCtx.SECOND() != null)
@@ -7592,7 +7625,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
     // Bucket name or numeric ID
     if (bodyCtx.INTEGER_LITERAL() != null) {
       stmt.bucketNumber = new PInteger();
-      stmt.bucketNumber.setValue(Integer.parseInt(bodyCtx.INTEGER_LITERAL().getText()));
+      stmt.bucketNumber.setValue(parseIntLiteral(bodyCtx.INTEGER_LITERAL().getText()));
     } else {
       stmt.bucketName = (Identifier) visit(bodyCtx.identifier());
     }
@@ -7958,7 +7991,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
     // RETRY clause
     if (commitCtx.INTEGER_LITERAL() != null) {
       final PInteger retry = new PInteger();
-      retry.value = Integer.parseInt(commitCtx.INTEGER_LITERAL().getText());
+      retry.value = parseIntLiteral(commitCtx.INTEGER_LITERAL().getText());
       stmt.retry = retry;
 
       // ELSE clause
@@ -8024,7 +8057,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
         for (final TerminalNode intNode : checkCtx.INTEGER_LITERAL()) {
           final BucketIdentifier bucketId = new BucketIdentifier();
           final PInteger pInt = new PInteger();
-          pInt.setValue(Integer.parseInt(intNode.getText()));
+          pInt.setValue(parseIntLiteral(intNode.getText()));
           bucketId.bucketId = pInt;
           stmt.buckets.add(bucketId);
         }
@@ -8588,8 +8621,8 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
       final String[] parts = inclusive ? tokenText.split("\\.\\.\\.") : tokenText.split("\\.\\.");
 
       if (parts.length == 2) {
-        final int from = Integer.parseInt(parts[0].trim());
-        final int to = Integer.parseInt(parts[1].trim());
+        final int from = parseIntLiteral(parts[0].trim());
+        final int to = parseIntLiteral(parts[1].trim());
 
         // Set from and to fields
         selector.from = from;
@@ -8836,7 +8869,7 @@ public class SQLASTBuilder extends SQLParserBaseVisitor<Object> {
   private static int parseCompactionThreshold(final String text) {
     final int value;
     try {
-      value = Integer.parseInt(text);
+      value = parseIntLiteral(text);
     } catch (final NumberFormatException e) {
       throw new CommandSQLParsingException("Invalid COMPACTION THRESHOLD value: '" + text + "' (must be a valid integer)");
     }

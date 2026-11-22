@@ -849,9 +849,6 @@ public enum Type {
         // A value read from text whose type the client left unspecified is that text as a STRING (issue #12711)
         if (value instanceof SourceText source)
           return source.sourceText();
-        // An array's toString() is its class code and identity hash ("[B@72e34f77"): not the content, not stable, and
-        // not reversible. Refuse it rather than store that (issue #9041).
-        if (property != null && valueClass.isArray())
         // A byte[]'s toString() is its class code and identity hash ("[B@72e34f77"): not the content, not stable, and not
         // reversible. Refuse it rather than store that (issue #9041).
         if (property != null && valueClass == byte[].class)

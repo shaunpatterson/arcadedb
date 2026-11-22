@@ -1697,6 +1697,18 @@ public class UpdateStatementExecutionTest extends TestHelper {
     }
   }
 
+  /** Regression test for issue #8814: the index walks of an OR are sub-plans of the source plan, and each one is read first. */
+  @ParameterizedTest
+  @ValueSource(strings = { "a < 5 OR a > 1990", "(a >= 0 AND a < 5) OR (a > 1990 AND a < 5000)" })
+  void anOrOfRangesIsReadBeforeAnyKeyMoves(final String where) {
+    commitAutoStartedTransaction();
+    load();
+    try (final ResultSet rs = database.query("sql", "EXPLAIN UPDATE V SET a = a + 10 WHERE " + where)) {
+      assertThat(rs.next().<String>getProperty("executionPlanAsString")).contains("MATERIALIZE");
+    }
+    assertEachMovedOnce(where, 14);
+  }
+
   // ---- #9971: UPDATE MERGE skips metadata keys ----
   //
   // Regression for issue #9971: {@code UPDATE ... MERGE} applied its payload one positional {@code set(name, value)} at a time,

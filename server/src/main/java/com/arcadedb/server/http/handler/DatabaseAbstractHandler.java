@@ -24,6 +24,8 @@ import com.arcadedb.database.Database;
 import com.arcadedb.database.DatabaseContext;
 import com.arcadedb.database.DatabaseInternal;
 import com.arcadedb.database.TransactionContext;
+import com.arcadedb.exception.DatabaseIsReopeningException;
+import com.arcadedb.exception.NeedRetryException;
 import com.arcadedb.exception.TransactionException;
 import com.arcadedb.log.LogManager;
 import com.arcadedb.query.RunningQuery;
@@ -232,6 +234,10 @@ public abstract class DatabaseAbstractHandler extends AbstractServerHttpHandler 
     RunningQuery runningQuery = null;
     HttpClientDisconnectWatch disconnectWatch = null;
     try {
+      // A write forwarded to the leader leaves its answer here (ForwardedRequestIdContext), for the catch below. Only an HA
+      // request outside a session forwards: a session's statements run on this node
+      if (haDbForRead != null && activeSession == null)
+        ForwardedRequestIdContext.armCommittedWriteAnswer();
       // Set read consistency context for HA follower reads.
       // Must be inside the try block so the finally always clears the ThreadLocal.
       if (haDbForRead != null) {
@@ -306,7 +312,17 @@ public abstract class DatabaseAbstractHandler extends AbstractServerHttpHandler 
       // Emit bookmark header for read-your-writes consistency
       emitCommitIndexBookmark(exchange, haDbForRead);
 
+    } catch (final NeedRetryException | DatabaseIsReopeningException failure) {
+      // A write this request forwarded to the leader is durable there: a refusal the client is told to retry, raised by what this
+      // node does afterwards (its copy of the database replaced by an HA resync under the request, a commit gate refusing the empty
+      // transaction around the forward), must not be answered as one, because the retry would run the write a second time. Any
+      // other failure (a security or serialization error, a timeout, a cancel) is not a statement about the write and is raised
+      if (!answerWithTheLeadersAnswer(response, failure))
+        throw failure;
     } finally {
+      // Whatever way the request ends, a pooled worker thread keeps no answer of this request (handleRequest clears the rest)
+      if (haDbForRead != null && activeSession == null)
+        ForwardedRequestIdContext.disarmCommittedWriteAnswer();
       try {
         if (haDbForRead != null) {
           // A request that left the try through an exception skipped the emit above and is answered after this block, by
@@ -345,6 +361,29 @@ public abstract class DatabaseAbstractHandler extends AbstractServerHttpHandler 
     }
 
     return response.get();
+  }
+
+  /**
+   * Settles a request that failed with a retryable refusal ({@link NeedRetryException}, {@link DatabaseIsReopeningException}) after
+   * the leader answered the write it forwarded: the answer of the request becomes the leader's own, unless the handler had rendered
+   * one already. Such a refusal can only be of what this node does with a write the leader has committed, so it says nothing about
+   * the write, and the 503 it maps to invites the replay that applies it twice.
+   * <p>
+   * Only when the request forwarded exactly one write ({@link ForwardedRequestIdContext#takeCommittedWriteAnswer()}): with
+   * several, the latest answer covers a part of the request. Package-private for direct unit testing.
+   *
+   * @return true when the request has an answer now, false when the failure has to be raised as it is
+   */
+  static boolean answerWithTheLeadersAnswer(final AtomicReference<ExecutionResponse> response, final RuntimeException failure) {
+    final String leaderAnswer = ForwardedRequestIdContext.takeCommittedWriteAnswer();
+    if (leaderAnswer == null)
+      return false;
+    LogManager.instance().log(DatabaseAbstractHandler.class, Level.WARNING,
+        "Request failed with %s (%s) after the leader committed the write it forwarded: answering with the leader's answer",
+        failure.getClass().getSimpleName(), failure.getMessage());
+    if (response.get() == null)
+      response.set(new ExecutionResponse(200, leaderAnswer));
+    return true;
   }
 
   /**

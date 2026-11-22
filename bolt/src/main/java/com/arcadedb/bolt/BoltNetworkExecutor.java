@@ -991,7 +991,7 @@ public class BoltNetworkExecutor extends Thread {
       // In READ access mode a statement the analyzer could not classify runs as a read: query() reports what is wrong with it,
       // and refuses it if it does write (QueryNotIdempotentException, answered as the access-mode refusal below)
       if (runAsWrite && !(readAccessMode && writeQuery == null)) {
-        stream.resultSet = database.command("opencypher", query, params);
+        stream.resultSet = runWrite(query, params);
       } else {
         stream.resultSet = database.query("opencypher", query, params);
       }

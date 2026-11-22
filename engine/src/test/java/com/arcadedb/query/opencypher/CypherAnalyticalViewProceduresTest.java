@@ -59,6 +59,9 @@ class CypherAnalyticalViewProceduresTest extends TestHelper {
     database.getSchema().createVertexType("City");
     database.getSchema().createEdgeType("ROAD");
     database.getSchema().createDocumentType("Note");
+    // The view holds the edge property in a column, so the schema has to declare it (issue #12177): a view
+    // over an undeclared property would read the edge records on every call
+    database.command("sql", "CREATE PROPERTY ROAD.distance DOUBLE");
     database.transaction(() -> {
       final MutableVertex rome = database.newVertex("City").set("name", "Rome").save();
       final MutableVertex milan = database.newVertex("City").set("name", "Milan").save();

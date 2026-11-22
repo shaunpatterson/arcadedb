@@ -166,8 +166,11 @@ public class ResultInternal implements Result {
     // the read reports that a part of the record did not decode, which is the one case that needs the names to tell a property
     // that is not there from one that could not be read. Listing the names first cost a second walk over the header, a set of them
     // and a copy of the map for every row of a result.
-    if (plain.element instanceof ImmutableDocument stored && excluded.isEmpty() && plain.projectionExcludes == null
-        && (plain.tombstones == null || plain.tombstones.isEmpty())) {
+    // EXACT CLASS ONLY, AS FOR THE ROW ABOVE: A SUBCLASS OF ImmutableDocument MAY OVERRIDE toMap(), AND THE ONE PASS READS
+    // THE RECORD THROUGH toMapReportingDamage() INSTEAD, WHICH WOULD BYPASS THAT OVERRIDE AND ANSWER A VALUE THE OVERRIDE
+    // REMOVED (issue #12979)
+    if (plain.element instanceof ImmutableDocument stored && stored.getClass() == ImmutableDocument.class && excluded.isEmpty()
+        && plain.projectionExcludes == null && (plain.tombstones == null || plain.tombstones.isEmpty())) {
       final String[] damage = new String[1];
       final Map<String, Object> read = stored.toMapReportingDamage(damage);
       if (damage[0] == null) {

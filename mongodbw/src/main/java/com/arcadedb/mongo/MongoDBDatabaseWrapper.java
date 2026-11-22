@@ -31,6 +31,7 @@ import com.arcadedb.exception.RecordNotFoundException;
 import com.arcadedb.exception.ValidationException;
 import com.arcadedb.log.LogManager;
 import com.arcadedb.network.binary.ServerIsNotTheLeaderException;
+import com.arcadedb.query.ProfiledLimitScope;
 import com.arcadedb.query.sql.executor.IteratorResultSet;
 import com.arcadedb.query.sql.executor.Result;
 import com.arcadedb.query.sql.executor.ResultInternal;
@@ -221,9 +222,12 @@ public class MongoDBDatabaseWrapper implements MongoDatabase {
       final Oplog opLog) {
     // NOT TAGGED HERE: MongoDBBackend TAGS EVERY ENTRY POINT THE LIBRARY CALLS WITH A CLIENT'S REQUEST, THIS ONE AMONG THEM
     // (ISSUE #10390)
+    final long quota = profiledLimit();
+    // THE SQL STATEMENTS THE COMMAND READS THROUGH ARE A PART OF IT: NONE TAKES THE QUOTA AS ITS LIMIT (ISSUE #13087)
+    ProfiledLimitScope.enter();
     try {
       if ("find".equalsIgnoreCase(command))
-        return find(channel, document);
+        return find(document, quota);
       else if ("create".equalsIgnoreCase(command))
         return createCollection(document);
       else if ("count".equalsIgnoreCase(command))
@@ -235,7 +239,7 @@ public class MongoDBDatabaseWrapper implements MongoDatabase {
       else if ("update".equalsIgnoreCase(command))
         return updateDocuments(document);
       else if ("aggregate".equalsIgnoreCase(command))
-        return aggregateCollection(command, document, opLog);
+        return aggregateCollection(command, document, opLog, quota);
       else if ("createIndexes".equalsIgnoreCase(command))
         return createIndexes(document);
       else {
@@ -247,7 +251,30 @@ public class MongoDBDatabaseWrapper implements MongoDatabase {
       }
     } catch (final Exception e) {
       throw wireException("Error on executing MongoDB '" + command + "' command", e);
+    } finally {
+      ProfiledLimitScope.exit();
     }
+  }
+
+  /**
+   * The documents the {@code resultSetLimit} of the current user's security groups lets a command answer, or -1 when nothing caps
+   * them (issue #13087). The quota caps the documents a {@code find} or an {@code aggregate} answers, as it caps the rows of a SQL
+   * or an openCypher statement, and never what the command reads, counts or writes: the SQL statements a command reads through
+   * run inside a {@link ProfiledLimitScope}, or each would take the quota as its LIMIT before the command has filtered and sorted,
+   * and a {@code count} would answer the quota and a {@code deleteMany} stop at it.
+   * <p>
+   * A command run as a part of a statement the quota already caps is not an answer to the user, and is not capped again. Read
+   * before the command enters the scope of its own.
+   */
+  private long profiledLimit() {
+    if (ProfiledLimitScope.isActive())
+      return -1L;
+    return database instanceof DatabaseInternal internal ? internal.getResultSetLimit() : -1L;
+  }
+
+  /** The documents of an answer, cut at the quota of the user's groups: {@code documents} itself when it holds no more. */
+  private static List<Document> capped(final List<Document> documents, final long quota) {
+    return quota < 0 || documents.size() <= quota ? documents : new ArrayList<>(documents.subList(0, (int) quota));
   }
 
   public ResultSet query(final String query) throws MongoServerException {
@@ -305,6 +332,21 @@ public class MongoDBDatabaseWrapper implements MongoDatabase {
 
   @Override
   public QueryResult handleQuery(final MongoQuery query) throws MongoServerException {
+    final long quota = profiledLimit();
+    ProfiledLimitScope.enter();
+    try {
+      return runQuery(query, quota);
+    } finally {
+      ProfiledLimitScope.exit();
+    }
+  }
+
+  /**
+   * Answers a query with at most {@code quota} documents, the cap of the user's groups (-1 for none): the tighter of it and the
+   * query's own limit, applied after the skip, the filter and the sort, which see every document. Runs inside the
+   * {@link ProfiledLimitScope} of its caller.
+   */
+  private QueryResult runQuery(final MongoQuery query, final long quota) throws MongoServerException {
     try {
       this.clearLastStatus(query.getChannel());
       final String collectionName = query.getCollectionName();
@@ -314,11 +356,27 @@ public class MongoDBDatabaseWrapper implements MongoDatabase {
       } else {
         final int numSkip = query.getNumberToSkip();
         final int numReturn = query.getNumberToReturn();
-        return collection.handleQuery(query.getQuery(), numSkip, numReturn);
+        if (quota == 0) {
+          // NO DOCUMENT IS ANSWERED, AND 0 MEANS NO LIMIT TO THE COLLECTION: THE QUERY STILL RUNS, SO A MALFORMED ONE IS REFUSED
+          collection.handleQuery(query.getQuery(), numSkip, 1);
+          return new QueryResult();
+        }
+        return collection.handleQuery(query.getQuery(), numSkip, tighterLimit(numReturn, quota));
       }
     } catch (final Exception e) {
       throw wireException("Error on executing MongoDB query", e);
     }
+  }
+
+  /**
+   * The limit of a query under a quota above zero: the quota where the query has no limit (0) or a larger one. A negative limit is
+   * the legacy request for a single batch of that many documents.
+   */
+  static int tighterLimit(final int numberToReturn, final long quota) {
+    if (quota < 0)
+      return numberToReturn;
+    final long requested = Math.abs((long) numberToReturn);
+    return requested == 0 || requested > quota ? (int) Math.min(quota, Integer.MAX_VALUE) : numberToReturn;
   }
 
   /**
@@ -383,7 +441,7 @@ public class MongoDBDatabaseWrapper implements MongoDatabase {
     };
   }
 
-  private Document aggregateCollection(final String command, final Document document, final Oplog oplog)
+  private Document aggregateCollection(final String command, final Document document, final Oplog oplog, final long quota)
       throws MongoServerException {
     MongoCommandFields.check("aggregate", document);
     final String collectionName = document.get("aggregate").toString();
@@ -414,7 +472,9 @@ public class MongoDBDatabaseWrapper implements MongoDatabase {
     final Aggregation aggregation = Aggregation.fromPipeline(pipeline, plugin, this, collection, oplog);
     aggregation.validate(document);
 
-    return firstBatchCursorResponse(collectionName, "firstBatch", computeResult(aggregation, pipeline, collection, oplog), 0);
+    // THE PIPELINE RUNS OVER EVERY DOCUMENT, A STAGE THAT WRITES ($out, $merge) INCLUDED: THE QUOTA CAPS THE DOCUMENTS IT ANSWERS
+    return firstBatchCursorResponse(collectionName, "firstBatch", capped(computeResult(aggregation, pipeline, collection, oplog), quota),
+        0);
   }
 
   /**
@@ -727,7 +787,7 @@ public class MongoDBDatabaseWrapper implements MongoDatabase {
     return value >= Integer.MIN_VALUE && value <= Integer.MAX_VALUE ? (Number) (int) value : (Number) value;
   }
 
-  private Document find(final Channel channel, final Document document) throws MongoServerException {
+  private Document find(final Document document, final long quota) throws MongoServerException {
     // a field this would not read is refused, not ignored: the answer would be the one of another command (issue #11778)
     MongoCommandFields.check("find", document);
     final Document filter = documentField(document, "filter");
@@ -759,20 +819,12 @@ public class MongoDBDatabaseWrapper implements MongoDatabase {
         collection.openCursor(new QueryParameters(queryPayload, skip, limit), projection) :
         MongoFindCursor.empty();
 
-    // what mongod answers first: the batch size when the command names one, else one batch holding the limit when it asks for a
-    // single batch, else 101 documents. The rest of the rows is read by the getMore commands, if the client asks for them
-    final long firstBatch = batchSize >= 0L ? batchSize : singleBatch && limit != 0 ? Math.abs((long) limit) : MongoFindCursor.DEFAULT_FIRST_BATCH;
-    final List<Document> documents;
-    final long cursorId;
-    try {
-      documents = cursor.takeBatch((int) Math.min(firstBatch, Integer.MAX_VALUE), MongoFindCursor.MAX_BATCH_BYTES);
-      // the cursor stays open for the rows the first batch did not take, unless it is exhausted or the client wants no more
-      cursorId = !singleBatch && !cursor.isDrained() ?
-          registerCursor(cursor, channel, collectionName, Utils.isTrue(document.get("noCursorTimeout"))) :
-          0L;
-    } catch (final RuntimeException | Error e) {
-      cursor.close();
-      throw e;
+    final QueryResult result = runQuery(mongoQuery, quota);
+
+    final List<Document> documents = new ArrayList<>();
+    for (Iterator<Document> it = result.iterator(); it.hasNext(); ) {
+      final Document next = it.next();
+      documents.add(projection != null ? projection.apply(next) : next);
     }
     if (cursorId == 0L)
       cursor.close();

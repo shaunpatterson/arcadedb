@@ -485,12 +485,33 @@ public class LocalDatabase extends RWLockContext implements DatabaseInternal {
 
   @Override
   public void drop() {
-    closeForDrop();
+    // THE PATH STAYS TAKEN, IN THE FACTORY'S REGISTRY, UNTIL THE FILES ARE GONE (ISSUE #12808): THE CLOSE BELOW USED TO RELEASE IT,
+    // AND A create() OR open() OF THE SAME PATH IN THE WINDOW BEFORE THE DELETE FINISHED BUILT ITS INSTANCE OVER THE FILES BEING
+    // DELETED, WHICH THE DELETE THEN TOOK FROM UNDER IT AND LEFT A TORN DIRECTORY THAT COULD BE NEITHER OPENED NOR CREATED. A CALLER
+    // IN THE WINDOW IS REFUSED AS "ACTIVE INSTANCE" INSTEAD, WHICH IS WHAT IT WOULD BE TOLD BY A DATABASE STILL CLOSING
+    registrationEndsWithDrop = true;
+    try {
+      closeForDrop();
 
-    executeInWriteLock(() -> {
-      FileUtils.deleteRecursively(new File(databasePath));
-      return null;
-    });
+      final Consumer<LocalDatabase> afterDropCloseHook = TEST_AFTER_DROP_CLOSE_HOOK;
+      if (afterDropCloseHook != null)
+        afterDropCloseHook.accept(this);
+
+      executeInWriteLock(() -> {
+        FileUtils.deleteRecursively(new File(databasePath));
+        return null;
+      });
+    } finally {
+      registrationEndsWithDrop = false;
+      // WHATEVER BECAME OF THE DELETE, AND WHEN THE CLOSE THREW AFTER MARKING THE INSTANCE CLOSED: NOTHING IS LEFT TO KEEP THE PATH
+      // FOR. ONLY WHEN THE CLOSE LEFT THE UNREGISTRATION TO THIS CALL: A DROP REFUSED BEFORE ANY CLOSE (THE INSTANCE WAS CLOSED
+      // ALREADY, OR HAS A TRANSACTION) HAS NOTHING TO UNREGISTER, AND A LocalDatabase EQUALS EVERY OTHER ONE OF ITS PATH, SO A
+      // CLOSED HANDLE'S REFUSED DROP WOULD TAKE THE INSTANCE OPENED SINCE OUT OF THE REGISTRY
+      if (unregistrationLeftToDrop) {
+        unregistrationLeftToDrop = false;
+        unregisterClosedInstance();
+      }
+    }
   }
 
   /**
@@ -4410,6 +4431,22 @@ public class LocalDatabase extends RWLockContext implements DatabaseInternal {
   static volatile Runnable TEST_AFTER_MARKED_CLOSED_HOOK = null;
 
   /**
+   * Test-only hook (issue #12808): when set, invoked by {@link #drop()} on the dropping thread once the instance is closed and
+   * before its files are deleted, so a test can act in the window in which the path used to be free while the files were still
+   * there.
+   */
+  static volatile Consumer<LocalDatabase> TEST_AFTER_DROP_CLOSE_HOOK = null;
+
+  /**
+   * Set for the length of {@link #drop()}, and by nothing else: the close then leaves the unregistration of this instance to
+   * {@code drop()}, which ends it once the files are deleted. {@link #closeForDrop()} does not set it, its caller owns the files.
+   */
+  private volatile boolean registrationEndsWithDrop = false;
+
+  /** Set by the close of a {@link #drop()} that left its unregistration to the end of the drop, see {@link #registrationEndsWithDrop}. */
+  private volatile boolean unregistrationLeftToDrop = false;
+
+  /**
    * Test-only hook (issue #8626): when set, invoked by {@link #performRecovery()} after every file is marked unsynced and
    * before the WAL is replayed, so a test can break a data file's fsync on the instance being recovered.
    */
@@ -4573,8 +4610,12 @@ public class LocalDatabase extends RWLockContext implements DatabaseInternal {
       // lookup reused the dead instance instead of opening the files. An instance that is still open - the teardown
       // failed before marking it closed - keeps its registration and its PageManager reference, which is what it
       // still holds.
-      if (!open)
-        unregisterClosedInstance();
+      if (!open) {
+        if (registrationEndsWithDrop)
+          unregistrationLeftToDrop = true;
+        else
+          unregisterClosedInstance();
+      }
     }
   }
 

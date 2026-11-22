@@ -1154,8 +1154,7 @@ public class LocalDatabase extends RWLockContext implements DatabaseInternal {
       var type = schema.getType(typeName);
       var iter = new MultiIterator<Record>();
 
-      // SET THE PROFILED LIMITS IF ANY
-      iter.setLimit(getResultSetLimit());
+      // THE resultSetLimit IS A ROW CAP OF THE QUERY ENGINES, NOT A SCAN CAP (ISSUE #12888): ONLY THE readTimeout APPLIES HERE
       iter.setTimeout(getReadTimeout(), true);
 
       for (final Bucket b : type.getBuckets(polymorphic))

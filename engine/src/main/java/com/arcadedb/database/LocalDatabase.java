@@ -5420,9 +5420,20 @@ public class LocalDatabase extends RWLockContext implements DatabaseInternal {
   }
 
   protected void checkDatabaseIsOpen(final boolean updateIntent, final String databaseReadOnlyErrorMessage) {
+    checkDatabaseIsOpenAndGetContext(updateIntent, databaseReadOnlyErrorMessage);
+  }
+
+  /**
+   * {@link #checkDatabaseIsOpen(boolean, String)}, answering this thread's context of the database it found or
+   * created: a thread that opens a transaction needs the context of the database it is in, and the context of a
+   * database is created the first time a thread touches it.
+   */
+  private DatabaseContext.DatabaseContextTL checkDatabaseIsOpenAndGetContext(final boolean updateIntent,
+      final String databaseReadOnlyErrorMessage) {
     checkOpenAndNotFenced();
-    if (DatabaseContext.INSTANCE.getContextIfExists(databasePath) == null)
-      DatabaseContext.INSTANCE.init(this);
+    DatabaseContext.DatabaseContextTL context = DatabaseContext.INSTANCE.getContextIfExists(databasePath);
+    if (context == null)
+      context = DatabaseContext.INSTANCE.init(this);
 
     // #8523: THIS RUNS ON EVERY SCHEMA LOOKUP AND RECORD READ OF EVERY THREAD, SO IT READS THE COARSE CLOCK (A VOLATILE)
     // RATHER THAN THE SYSTEM ONE, AND WRITES THE STAMPS ONLY WHEN THE TICK CHANGED. AN UNCONDITIONAL STORE MADE EACH CORE TAKE

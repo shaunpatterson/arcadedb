@@ -93,8 +93,7 @@ public class MongoDBCreateIndexTest extends BaseMongoServerTest {
     collection.createIndex(new Document("name", 1), new IndexOptions().unique(true));
 
     final Database database = getServerDatabase(0, getDatabaseName());
-    // a unique index is built on the derived key of its fields, which keeps their types (issue #12073)
-    final TypeIndex index = database.getSchema().getType("doc").getIndexByProperties(MongoKeys.propertyOf(new String[] { "name" }));
+    final TypeIndex index = database.getSchema().getType("doc").getIndexByProperties("name");
     assertThat(index).isNotNull();
     assertThat(index.isUnique()).isTrue();
   }

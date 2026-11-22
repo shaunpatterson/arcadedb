@@ -130,9 +130,7 @@ class Issue11446MongoCreateIndexOptionsTest extends BaseMongoServerTest {
     final Document reply = createIndexes("supported", spec);
 
     assertThat(reply.get("ok")).isEqualTo(1.0);
-    // a unique index is built on the derived key of its fields (issue #12073)
-    assertThat(serverDatabase().getSchema().getType("supported").getIndexByProperties(MongoKeys.propertyOf(new String[] { "k" })).isUnique())
-        .isTrue();
+    assertThat(serverDatabase().getSchema().getType("supported").getIndexByProperties("k").isUnique()).isTrue();
   }
 
   @Test

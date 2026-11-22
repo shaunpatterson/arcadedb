@@ -526,13 +526,11 @@ public class MongoDBWireSemanticsTest extends BaseMongoServerTest {
   }
 
   @Test
-  void numericAndStringIdsOfTheSameTextAreDifferentIds() {
-    // the unique index is on the derived key of the _id, which keeps its type (issue #12073): 1 and "1" are two ids, as in
-    // MongoDB, while 1 and 1.0 are one
+  void numericAndStringIdsOfTheSameTextShareAKeyOnceKindsAreMixed() {
+    // a known deviation from MongoDB, pinned so a change of the key strategy is a conscious decision: once the _id kinds are
+    // mixed the index holds string keys, and 1 and "1" are the same key
     collection.insertOne(new Document("_id", 1));
     collection.insertOne(new Document("_id", "abc"));
-    collection.insertOne(new Document("_id", "1"));
-    assertThatThrownBy(() -> collection.insertOne(new Document("_id", 1.0))).isInstanceOf(MongoWriteException.class);
-    assertThat(collection.countDocuments()).isEqualTo(3);
+    assertThatThrownBy(() -> collection.insertOne(new Document("_id", "1"))).isInstanceOf(MongoWriteException.class);
   }
 }

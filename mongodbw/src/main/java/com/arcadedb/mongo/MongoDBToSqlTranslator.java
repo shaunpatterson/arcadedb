@@ -42,6 +42,7 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collection;
 import java.util.Date;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -471,12 +472,33 @@ public class MongoDBToSqlTranslator {
     return buffer.append('.').append(Identifier.quote(field.substring(start))).toString();
   }
 
+  protected static void fillResultSet(final int numberToSkip, final int numberToReturn, final List<Document> result, final Iterator it) {
+    for (int i = 0; it.hasNext(); ++i) {
+      // consume the element before deciding whether to skip it - a "continue" that never calls next() burns loop
+      // counter iterations without advancing the iterator, so skip has no effect for any numberToSkip >= 1
+      final Object next = it.next();
+
+      if (numberToSkip > 0 && i < numberToSkip)
+        continue;
+
+      if (next instanceof com.arcadedb.database.Document document)
+        result.add(convertDocumentToMongoDB(document));
+      else if (next instanceof Result result1)
+        result.add(convertDocumentToMongoDB(result1));
+      else
+        throw new IllegalArgumentException("Object not supported");
+
+      if (numberToReturn > 0 && result.size() >= numberToReturn)
+        break;
+    }
+  }
+
   protected static Document convertDocumentToMongoDB(final com.arcadedb.database.Document doc) {
-    return convertMapToMongoDB(doc.toMap(), true);
+    return convertMapToMongoDB(doc.toMap());
   }
 
   protected static Document convertDocumentToMongoDB(final Result doc) {
-    return convertMapToMongoDB(doc.toMap(), true);
+    return convertMapToMongoDB(doc.toMap());
   }
 
   /**
@@ -484,21 +506,16 @@ public class MongoDBToSqlTranslator {
    * own class (an Integer, a Long, a Date, a {@code null}), and a BSON document can only name a field by text. The key's text is
    * taken exactly as the shared {@code JSONObject(Map)} constructor takes it, a {@code null} key named {@code "null"}, so the same
    * record reads the same through every protocol (issue #9973).
-   *
-   * @param document whether the map is the document itself: only its {@code _id} is the one that reads as an ObjectId when it spells
-   *                 one (see {@link #convertIdToMongoDB}), an {@code _id} inside an embedded document is a field like any other, a
-   *                 String that spells an ObjectId is the String it was written as (issue #12073)
    */
-  private static Document convertMapToMongoDB(final Map<?, ?> map, final boolean document) {
+  private static Document convertMapToMongoDB(final Map<?, ?> map) {
     final Document result = new Document();
     for (final Map.Entry<?, ?> entry : map.entrySet()) {
       final String p = String.valueOf(entry.getKey());
       // the record's own metadata is not part of a MongoDB document: a client would see fields it never wrote
-      // (the derived keys of the unique indexes are properties of the record, not of an embedded document)
-      if (document ? isRecordMetadata(p) : isEngineMetadata(p))
+      if (isRecordMetadata(p))
         continue;
       final Object value = entry.getValue();
-      result.put(p, document && "_id".equals(p) ? convertIdToMongoDB(value) : toBsonValue(value));
+      result.put(p, "_id".equals(p) ? convertIdToMongoDB(value) : toBsonValue(value));
     }
     return result;
   }
@@ -518,18 +535,7 @@ public class MongoDBToSqlTranslator {
     return result;
   }
 
-  /**
-   * The properties of a record that are not fields of the MongoDB document: the record's own metadata, and the derived keys the
-   * unique indexes are built on ({@link MongoKeys}).
-   */
   static boolean isRecordMetadata(final String property) {
-    return isEngineMetadata(property) || MongoKeys.isKeyProperty(property);
-  }
-
-  /**
-   * The metadata the engine puts in the map of a record or of an embedded document.
-   */
-  private static boolean isEngineMetadata(final String property) {
     return "@rid".equals(property) || "@type".equals(property) || "@cat".equals(property);
   }
 
@@ -580,7 +586,7 @@ public class MongoDBToSqlTranslator {
       // a malformed tag stays a plain map and is converted like any other embedded document
       if (bson != value)
         return bson;
-      return convertMapToMongoDB((Map<?, ?>) value, false);
+      return convertMapToMongoDB((Map<?, ?>) value);
     } else if (value instanceof LocalDateTime dateTime)
       return dateTime.toInstant(ZoneOffset.UTC);
     else if (value instanceof LocalDate date)

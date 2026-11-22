@@ -440,10 +440,8 @@ public class Issue11502MongoWireRepliesTest extends BaseMongoServerTest {
      */
     @Test
     void anUpsertRefusedAtCommitIsNotReportedAsUpserted() {
-      // a unique index takes a missing field as null, as mongod does (issue #12073): at most one document may lack k when it is built
-      collection.updateOne(eq("_id", 1), new Document("$set", new Document("k", "taken")));
-      collection.updateOne(eq("_id", 2), new Document("$set", new Document("k", "two")));
       collection.createIndex(new Document("k", 1), new IndexOptions().unique(true));
+      collection.updateOne(eq("_id", 1), new Document("$set", new Document("k", "taken")));
 
       final Document reply = mongoDatabase.runCommand(new Document("update", "doc").append("ordered", false).append("updates", List.of(
           upsert(300, "free"), upsert(301, "taken"), upsert(302, "other"))));

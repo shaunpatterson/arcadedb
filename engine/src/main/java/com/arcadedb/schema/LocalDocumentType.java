@@ -3056,6 +3056,13 @@ public class LocalDocumentType implements DocumentType {
       // caller itself wrote into the bucket before the attach (a bucket detached and attached again in one transaction) is not
       // seen by this build, and is given its entries when the caller commits (issue #10588).
       //
+      // OWN, not joined, whatever transaction the statement runs in: an `ALTER TYPE x BUCKET +y` is a statement of a client,
+      // which runs inside one. The header page of the sub-index written into it is published by the commit of that transaction,
+      // which a rollback takes back, and which an HA leader ships AFTER the schema entry that creates the file: a follower
+      // then loads an index file with no header page, and the bucket's index is unavailable there (a UNIQUE one makes it
+      // re-install the whole database from the leader). In its own transaction the page is committed here, and the leader's
+      // schema session ships it inside the entry that creates the file.
+      //
       // A bucket that is not new can hold records, and so a key a UNIQUE index of this type already holds: the attach is
       // then refused and handed back whole, exactly as addSuperType hands back a link (issue #11302). Every component an
       // attempt created is dropped when it fails, before the retry: they outlive the rollback, and a retry that created

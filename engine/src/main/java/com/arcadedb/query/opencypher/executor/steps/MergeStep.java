@@ -73,6 +73,9 @@ import com.arcadedb.index.TypeIndex;
 import com.arcadedb.schema.DocumentType;
 import com.arcadedb.schema.EdgeType;
 import com.arcadedb.schema.Property;
+import com.arcadedb.schema.Schema;
+import com.arcadedb.security.SecurityDatabaseUser;
+import com.arcadedb.security.SecurityHelper;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -465,12 +468,13 @@ public class MergeStep extends AbstractExecutionStep {
     final List<Result> found = findAllMatchingPaths(pathPattern, baseResult);
     if (!found.isEmpty())
       return found;
+    final TypeIndex answeredBy = existenceIndex;
 
     // Issue #4351: when path creation collides on a UNIQUE index (most often a
     // node endpoint already inserted earlier in the same batch), re-run the
     // path match so MERGE preserves its atomic match-or-create semantics.
     try {
-      return createNewPath(pathPattern, baseResult);
+      return createNewPath(pathPattern, baseResult, answeredBy);
     } catch (final DuplicatedKeyException e) {
       final List<Result> retry = findAllMatchingPaths(pathPattern, baseResult);
       if (retry.isEmpty())
@@ -702,6 +706,132 @@ public class MergeStep extends AbstractExecutionStep {
       results.add(r);
     }
 
+    return true;
+  }
+
+  /**
+   * The existence check of a relationship between two bound nodes answered from an exact-key index of its type that the pattern's
+   * properties cover whole, instead of a walk of an edge list (issue #12483). The walk recorded a read of the head of the list it
+   * walked, and any relationship a concurrent transaction gave either node, to any other node, moved that head and refused the
+   * MERGE at commit (#12320): a bulk load of relationships with unique keys between shared vertices was refused about twice per
+   * committed batch, and eight writers loaded about four times slower than one. The index read leaves the lists alone.
+   * <p>
+   * What the walk's refusal protected, the same relationship created by a concurrent transaction, is kept by the registry of
+   * #11482: the commit of every relationship of a type with such an index marks its key, whatever statement created it and with
+   * the values it is committed with, and a relationship this MERGE creates checks that key ({@link #createPatternEdge}).
+   * <p>
+   * Not taken, and the walk answers: a prefix of an index (the registry key is the index's whole key), a null among the values
+   * (no relationship is indexed under it), a user who may not read the type (the walk refuses whether or not the value exists, a
+   * seek would refuse only when it does, see {@link SecurityHelper#canAccessType}).
+   *
+   * @return the index that answered, with every matching path added to {@code results}, or null when none did
+   */
+  private TypeIndex tryFindRelationshipByIndex(final PathPattern pathPattern, final ResultInternal baseResult,
+      final List<Result> results) {
+    if (pathPattern.getRelationshipCount() != 1)
+      return null;
+    final RelationshipPattern relPattern = pathPattern.getRelationship(0);
+    if (!relPattern.hasTypes() || relPattern.getTypes().size() != 1 || !relPattern.hasProperties() || relPattern.isVariableLength())
+      return null;
+    final NodePattern leftPattern = pathPattern.getNode(0);
+    final NodePattern rightPattern = pathPattern.getNode(1);
+    if (leftPattern.getVariable() == null || rightPattern.getVariable() == null)
+      return null;
+    if (!(baseResult.getProperty(leftPattern.getVariable()) instanceof Vertex left) || left.getIdentity() == null
+        || !(baseResult.getProperty(rightPattern.getVariable()) instanceof Vertex right) || right.getIdentity() == null)
+      return null;
+
+    final String relType = relPattern.getFirstType();
+    final Schema schema = context.getDatabase().getSchema();
+    if (!schema.existsType(relType) || !(schema.getType(relType) instanceof EdgeType type))
+      return null;
+    // asked again only when the type or the schema changed: the user of a statement does not change while it runs, a hierarchy can
+    final long schemaVersion = schema.getEmbedded().getVersion();
+    if (type != readCheckedType || schemaVersion != readCheckedSchemaVersion) {
+      readCheckedType = type;
+      readCheckedSchemaVersion = schemaVersion;
+      readCheckedAnswer = canReadEveryRecordAnIndexOfCanAnswer(type);
+    }
+    if (!readCheckedAnswer)
+      return null;
+
+    final Map<String, Object> relProps = evaluateMatchProperties(relPattern.getProperties(), baseResult);
+    final Iterator<Identifiable> candidates = tryFindByIndex(type, relType, relProps, true);
+    if (candidates == null)
+      return null;
+    final TypeIndex index = lastLookupIndex;
+
+    if (!matchesNodePattern(left, leftPattern, baseResult) || !matchesNodePattern(right, rightPattern, baseResult))
+      // an end does not satisfy its own constraints: no path exists
+      return index;
+
+    final RID leftRid = left.getIdentity();
+    final RID rightRid = right.getIdentity();
+    final Direction dir = relPattern.getDirection();
+    while (candidates.hasNext()) {
+      final Identifiable identifiable = candidates.next();
+      if (identifiable == null)
+        continue;
+      final Edge edge;
+      try {
+        edge = identifiable.asEdge(true);
+      } catch (final RecordNotFoundException e) {
+        // an entry of a relationship deleted since the index was written: the walk would not reach it either
+        continue;
+      }
+      final boolean forward = leftRid.equals(edge.getOut()) && rightRid.equals(edge.getIn());
+      final boolean backward = rightRid.equals(edge.getOut()) && leftRid.equals(edge.getIn());
+      if (!(dir == Direction.OUT ? forward : dir == Direction.IN ? backward : forward || backward))
+        continue;
+      // the index covers the properties of its key, the pattern can name more
+      if (!matchesProperties(edge, relProps))
+        continue;
+
+      final ResultInternal r = copyResult(baseResult);
+      if (relPattern.getVariable() != null)
+        r.setProperty(relPattern.getVariable(), edge);
+      r.setProperty(WAS_CREATED, false);
+      final Object[] trace = newPathTrace(pathPattern);
+      tracePathElement(trace, 0, left);
+      tracePathElement(trace, 2, right);
+      tracePathElement(trace, 1, edge);
+      addPathBinding(r, pathPattern, trace);
+      results.add(r);
+    }
+    return index;
+  }
+
+  /**
+   * Whether the user may read every record an index lookup for {@code type} can load: those of the type and of its subtypes, and,
+   * through an index a super type declares, those of that super type and of every type under it, siblings included, which the lookup
+   * loads before it filters them by label. So the whole hierarchy under each root super type. Per type, so the answer does not
+   * depend on the value looked up.
+   */
+  private boolean canReadEveryRecordAnIndexOfCanAnswer(final DocumentType type) {
+    final List<DocumentType> superTypes = type.getSuperTypes();
+    if (superTypes.isEmpty())
+      return canReadTypeAndSubTypes(type);
+    for (final DocumentType superType : superTypes)
+      if (!canReadEveryRecordAnIndexOfCanAnswer(superType))
+        return false;
+    return true;
+  }
+
+  private boolean canReadTypeAndSubTypes(final DocumentType type) {
+    // every bucket, not one of them (SecurityHelper.canAccessType): a user may be granted some buckets of a type and not others, and
+    // the lookup loads a record from whichever bucket holds it
+    final List<Integer> bucketIds = type.getBucketIds(false);
+    if (bucketIds.isEmpty()) {
+      if (!SecurityHelper.canAccessType(context.getDatabase(), type, SecurityDatabaseUser.ACCESS.READ_RECORD))
+        return false;
+    } else
+      for (int i = 0; i < bucketIds.size(); i++)
+        if (!SecurityHelper.canAccessFile((DatabaseInternal) context.getDatabase(), bucketIds.get(i),
+            SecurityDatabaseUser.ACCESS.READ_RECORD))
+          return false;
+    for (final DocumentType subType : type.getSubTypes())
+      if (!canReadTypeAndSubTypes(subType))
+        return false;
     return true;
   }
 
@@ -1210,8 +1340,11 @@ public class MergeStep extends AbstractExecutionStep {
    * Creates all nodes and edges in the path that are not already bound from a
    * preceding MATCH.  Never calls {@code findNode()} — every missing node is
    * created fresh.
+   *
+   * @param answeredBy the index that answered the existence check of the single relationship of the path (issue #12483), whose key
+   *                   the commit of the relationship created checks, or null when a walk answered
    */
-  private List<Result> createNewPath(final PathPattern pathPattern, final ResultInternal baseResult) {
+  private List<Result> createNewPath(final PathPattern pathPattern, final ResultInternal baseResult, final TypeIndex answeredBy) {
     final List<Vertex> vertices = new ArrayList<>();
     // The nodes this MERGE creates. No other transaction can know them, but a relationship from an existing node to one of them
     // can still duplicate a concurrent MERGE's equivalent path from that node (issue #11660)
@@ -1409,6 +1542,15 @@ public class MergeStep extends AbstractExecutionStep {
    */
   private Iterator<Identifiable> tryFindByIndex(final DocumentType type, final String label,
       final Map<String, Object> evaluatedProperties) {
+    return tryFindByIndex(type, label, evaluatedProperties, false);
+  }
+
+  /**
+   * @param wholeKeyOnly only an index whose every property is bound to a non-null value answers, never a prefix (issue #12483)
+   */
+  private Iterator<Identifiable> tryFindByIndex(final DocumentType type, final String label,
+      final Map<String, Object> evaluatedProperties, final boolean wholeKeyOnly) {
+    lastLookupIndex = null;
     TypeIndex bestIndex = null;
     int bestMatchCount = 0;
     boolean bestWholeKey = false;
@@ -1431,7 +1573,7 @@ public class MergeStep extends AbstractExecutionStep {
 
       final boolean wholeKey = matchCount == indexProperties.size();
       // a whole key beats any prefix, a UNIQUE one included: it is an exact lookup rather than a range
-      if (bestWholeKey && !wholeKey)
+      if ((bestWholeKey || wholeKeyOnly) && !wholeKey)
         continue;
       if (!wholeKey) {
         try {
@@ -1467,7 +1609,7 @@ public class MergeStep extends AbstractExecutionStep {
       final Object stored = property != null ? InlineProperties.declaredValue(property, context.getDatabase(), value) : null;
       propertyValues[i] = stored != null ? stored : TemporalUtil.toIndexKey(value);
       // a prefix holding a null reaches no record of an index that skips the keys whose every column is null
-      if (!bestWholeKey && propertyValues[i] == null)
+      if ((!bestWholeKey || wholeKeyOnly) && propertyValues[i] == null)
         return null;
     }
 

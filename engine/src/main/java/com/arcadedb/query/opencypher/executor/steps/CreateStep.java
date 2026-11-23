@@ -22,6 +22,7 @@ import com.arcadedb.GlobalConfiguration;
 import com.arcadedb.database.Database;
 import com.arcadedb.database.DatabaseInternal;
 import com.arcadedb.database.DeferredExistenceChecks;
+import com.arcadedb.database.DocumentValidator;
 import com.arcadedb.database.MutableDocument;
 import com.arcadedb.exception.TimeoutException;
 import com.arcadedb.graph.Edge;
@@ -511,9 +512,9 @@ public class CreateStep extends AbstractExecutionStep {
     final Object[] edgeProperties;
     if (relPattern.hasProperties()) {
       if (relPattern.getPropertiesParameterName() != null)
-        edgeProperties = buildPropertiesFromParameter(relPattern.getPropertiesParameterName());
+        edgeProperties = buildPropertiesFromParameter(type, relPattern.getPropertiesParameterName());
       else
-        edgeProperties = buildEdgeProperties(relPattern.getProperties(), currentResult);
+        edgeProperties = buildEdgeProperties(type, relPattern.getProperties(), currentResult);
     } else
       edgeProperties = null;
     if (context.isProfiling())
@@ -571,9 +572,11 @@ public class CreateStep extends AbstractExecutionStep {
           value = expr.evaluate(currentResult, context);
       }
 
-      // In Cypher, null property values are not stored
+      // In Cypher, null property values are not stored; a NOTNULL property refuses the null as SQL does (issue #13227)
       if (value != null)
         document.set(key, convertTemporalForStorage(value, key, rawValue));
+      else
+        DocumentValidator.requireNullAllowed(document.getType(), key, null);
     }
   }
 
@@ -589,6 +592,8 @@ public class CreateStep extends AbstractExecutionStep {
         final Object value = entry.getValue();
         if (value != null)
           document.set(entry.getKey(), convertTemporalForStorage(value, entry.getKey(), parameterName));
+        else
+          DocumentValidator.requireNullAllowed(document.getType(), entry.getKey(), null);
       }
     }
   }
@@ -614,7 +619,7 @@ public class CreateStep extends AbstractExecutionStep {
    * - ParameterReference objects (to be resolved from context parameters)
    * - Expression objects (to be evaluated in the context of the current result)
    */
-  private Object[] buildEdgeProperties(final Map<String, Object> properties, final Result currentResult) {
+  private Object[] buildEdgeProperties(final String edgeType, final Map<String, Object> properties, final Result currentResult) {
     final List<Object> keyValues = new ArrayList<>(properties.size() * 2);
     for (final Map.Entry<String, Object> entry : properties.entrySet()) {
       // Intern property names to reduce string allocations in bulk operations
@@ -641,11 +646,12 @@ public class CreateStep extends AbstractExecutionStep {
           value = expr.evaluate(currentResult, context);
       }
 
-      // In Cypher, null property values are not stored
+      // In Cypher, null property values are not stored; a NOTNULL property refuses the null as SQL does (issue #13227)
       if (value != null) {
         keyValues.add(key);
         keyValues.add(convertTemporalForStorage(value, key, rawValue));
-      }
+      } else
+        DocumentValidator.requireNullAllowed(context.getDatabase().getSchema().getType(edgeType), key, null);
     }
     return keyValues.toArray();
   }
@@ -655,7 +661,7 @@ public class CreateStep extends AbstractExecutionStep {
    * runtime. Used for bare parameter properties syntax (e.g., CREATE (a)-[:REL $props]->(b)).
    */
   @SuppressWarnings("unchecked")
-  private Object[] buildPropertiesFromParameter(final String parameterName) {
+  private Object[] buildPropertiesFromParameter(final String edgeType, final String parameterName) {
     final Object paramValue = context.getInputParameters().get(parameterName);
     if (!(paramValue instanceof Map))
       return null;
@@ -666,7 +672,8 @@ public class CreateStep extends AbstractExecutionStep {
       if (value != null) {
         keyValues.add(entry.getKey());
         keyValues.add(convertTemporalForStorage(value, entry.getKey(), parameterName));
-      }
+      } else
+        DocumentValidator.requireNullAllowed(context.getDatabase().getSchema().getType(edgeType), entry.getKey(), null);
     }
     return keyValues.toArray();
   }

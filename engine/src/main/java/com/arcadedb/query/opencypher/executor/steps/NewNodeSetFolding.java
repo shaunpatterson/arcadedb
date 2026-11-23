@@ -18,6 +18,7 @@
  */
 package com.arcadedb.query.opencypher.executor.steps;
 
+import com.arcadedb.database.DocumentValidator;
 import com.arcadedb.graph.MutableVertex;
 import com.arcadedb.query.opencypher.ast.CypherReferencedVariables;
 import com.arcadedb.query.opencypher.ast.SetClause;
@@ -103,6 +104,12 @@ final class NewNodeSetFolding {
         case REPLACE_MAP -> SetClauseApplier.toPropertyMap(value, "=", item.getValueExpression());
         default -> SetClauseApplier.toPropertyMap(value, "+=", item.getValueExpression());
       };
+      // a null is not stored, so a NOTNULL property is refused here, before any item is written, as SQL refuses it (issue #13227)
+      if (item.getType() == SetClause.SetType.PROPERTY) {
+        if (values[i] == null)
+          DocumentValidator.requireNullAllowed(vertex.getType(), item.getProperty(), null);
+      } else
+        SetClauseApplier.refuseNullsForNotNullProperties(vertex.getType(), asPropertyMap(values[i]), null);
     }
 
     int counted = 0;

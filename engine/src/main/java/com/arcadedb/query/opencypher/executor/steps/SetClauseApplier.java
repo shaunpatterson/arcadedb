@@ -21,6 +21,7 @@ package com.arcadedb.query.opencypher.executor.steps;
 import com.arcadedb.database.BaseRecord;
 import com.arcadedb.database.Binary;
 import com.arcadedb.database.Document;
+import com.arcadedb.database.DocumentValidator;
 import com.arcadedb.database.MutableDocument;
 import com.arcadedb.database.RID;
 import com.arcadedb.exception.ConcurrentModificationException;
@@ -273,6 +274,9 @@ public final class SetClauseApplier {
         // right-hand side that is neither an entity nor a map fails the clause before any of it has been written.
         values[i] = toPropertyMap(evaluator.evaluate(item.getValueExpression(), result, context),
             item.getType() == SetClause.SetType.REPLACE_MAP ? "=" : "+=", item.getValueExpression());
+        // A null entry removes the property (+=) or leaves it out (=): a NOTNULL property is refused here, with the rest of the
+        // clause still unwritten, as SQL refuses the null (issue #13227)
+        refuseNullsForNotNullProperties(item.getVariable(), asPropertyMap(values[i]), result, writtenDocs);
         break;
       case LABELS:
         // A Cypher 25 dynamic label - SET n:$(expr) - is a read of the row, so it is answered from the pre-clause
@@ -282,6 +286,32 @@ public final class SetClauseApplier {
         break;
       }
     }
+  }
+
+  /**
+   * Refuses a map item that writes a null to a NOTNULL property of its target (issue #13227): {@code SET n += {p: null}}
+   * removes the property and {@code SET n = {p: null}} leaves it out, so the validator never sees the null that SQL refuses.
+   * A property the target loses because the map does not name it ({@code SET n = map}) is a removal, not a null write.
+   */
+  private void refuseNullsForNotNullProperties(final String variable, final Map<String, Object> map, final Result result,
+      final Map<RID, MutableDocument> writtenDocs) {
+    if (map == null || !map.containsValue(null))
+      return;
+    final Document target = resolveLatestDoc(variable, result, writtenDocs);
+    if (target != null)
+      refuseNullsForNotNullProperties(target.getType(), map, target);
+  }
+
+  /**
+   * The map form of {@link DocumentValidator#requireNullAllowed}, shared with {@link NewNodeSetFolding}, which writes the same
+   * items onto a node that is not saved yet ({@code record} is then null).
+   */
+  static void refuseNullsForNotNullProperties(final DocumentType type, final Map<String, Object> map, final Object record) {
+    if (map == null)
+      return;
+    for (final Map.Entry<String, Object> entry : map.entrySet())
+      if (entry.getValue() == null)
+        DocumentValidator.requireNullAllowed(type, entry.getKey(), record);
   }
 
   /**

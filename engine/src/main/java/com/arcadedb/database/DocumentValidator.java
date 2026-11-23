@@ -874,6 +874,22 @@ public class DocumentValidator {
   }
 
   /**
+   * Refuses a null that a language which stores none is about to write to a NOTNULL property of {@code type}. openCypher
+   * removes the property on {@code SET n.p = null} and never stores one on {@code CREATE}, so the presence-based rule of
+   * {@link #unmetExistenceConstraint} never sees the null that SQL's {@code UPDATE} and {@code INSERT} are refused for
+   * (issues #13039, #13227): every write form of that language asks here for each null it drops.
+   *
+   * @param record the record the null is written to, quoted in the refusal as the SQL one does, or null when it does not exist yet
+   */
+  public static void requireNullAllowed(final DocumentType type, final String propertyName, final Object record)
+      throws ValidationException {
+    final Property p = type.getPolymorphicPropertyIfExists(propertyName);
+    if (p != null && p.isNotNull())
+      throwValidationException(type, p, ValidationException.Kind.NOT_NULL,
+          record != null ? "cannot be null, record: " + record : "cannot be null");
+  }
+
+  /**
    * @return true when an existence constraint the document does not satisfy has been deferred to the end of the
    * statement instead of being raised here - see {@link DeferredExistenceChecks}
    */

@@ -166,6 +166,11 @@ public class ImmutableLightEdge extends ImmutableDocument implements LightEdge {
   }
 
   @Override
+  public Map<String, Object> toMapReportingDamage(final String[] damage) {
+    return new LinkedHashMap<>();
+  }
+
+  @Override
   public Edge asEdge() {
     return this;
   }

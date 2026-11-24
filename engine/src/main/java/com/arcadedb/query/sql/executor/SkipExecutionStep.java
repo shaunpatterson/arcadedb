@@ -148,4 +148,14 @@ public class SkipExecutionStep extends AbstractExecutionStep {
       result += " (" + skippedUnloaded + " rows passed over in the index, records not loaded)";
     return result;
   }
+
+  @Override
+  public boolean canBeCached() {
+    return true;
+  }
+
+  @Override
+  public ExecutionStep copy(final CommandContext context) {
+    return new SkipExecutionStep(skip.copy(), context);
+  }
 }

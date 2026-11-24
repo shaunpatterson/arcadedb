@@ -892,6 +892,16 @@ public class AggregateProjectionCalculationStep extends ProjectionCalculationSte
     return result;
   }
 
+  /**
+   * The groups and the aggregate functions' accumulators are made when the step runs, and {@link #copy} builds a step with its own
+   * copy of the projection and GROUP BY, so a plan holding this step is reusable (the limit and timeout are fixed by the statement
+   * text for any plan the cache keeps, see {@code SelectExecutionPlanner.limitAndSkipAreFixedByTheText}).
+   */
+  @Override
+  public boolean canBeCached() {
+    return true;
+  }
+
   @Override
   public ExecutionStep copy(final CommandContext context) {
     final AggregateProjectionCalculationStep copy = new AggregateProjectionCalculationStep(projection.copy(),

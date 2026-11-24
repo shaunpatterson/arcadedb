@@ -464,7 +464,7 @@ public class MergeStep extends AbstractExecutionStep {
    * mapped to an unrelated existing node (fix for issue #3998).
    */
   private List<Result> mergePathAll(final PathPattern pathPattern, final ResultInternal baseResult) {
-    final List<Result> found = findAllMatchingPaths(pathPattern, baseResult);
+    final List<Result> found = findAllMatchingPathsDroppingReads(pathPattern, baseResult);
     if (!found.isEmpty())
       return found;
     final TypeIndex answeredBy = existenceIndex;
@@ -475,10 +475,33 @@ public class MergeStep extends AbstractExecutionStep {
     try {
       return createNewPath(pathPattern, baseResult, answeredBy);
     } catch (final DuplicatedKeyException e) {
-      final List<Result> retry = findAllMatchingPaths(pathPattern, baseResult);
+      final List<Result> retry = findAllMatchingPathsDroppingReads(pathPattern, baseResult);
       if (retry.isEmpty())
         throw e;
       return retry;
+    }
+  }
+
+  /**
+   * {@link #findAllMatchingPaths} for the existence probe of a MERGE, with the reads of its walk dropped when that is sound (issue #13225).
+   */
+  private List<Result> findAllMatchingPathsDroppingReads(final PathPattern pathPattern, final ResultInternal baseResult) {
+    // Only a single relationship with an endpoint the row already binds: its creation is either between two existing nodes or from
+    // one to a node it creates, which the merged-edge registry checks. A path that creates every node, or a longer one, has no such
+    // check once the probe's reads are dropped (the nodes it scans are read from pages the registry knows nothing of)
+    final TransactionContext tx = pathPattern.getRelationshipCount() == 1 && findBoundAnchorIndex(pathPattern, baseResult) >= 0 ?
+        ((DatabaseInternal) context.getDatabase()).getTransactionIfExists() : null;
+    if (tx == null)
+      return findAllMatchingPaths(pathPattern, baseResult);
+    tx.beginMergeProbe();
+    List<Result> found = null;
+    try {
+      found = findAllMatchingPaths(pathPattern, baseResult);
+      return found;
+    } finally {
+      // dropped whatever the probe found: a hit decides nothing that a later write rests on (READ_COMMITTED), and a miss is
+      // followed by a creation the merged-edge registry checks. An error keeps the reads
+      tx.endMergeProbe(found == null);
     }
   }
 

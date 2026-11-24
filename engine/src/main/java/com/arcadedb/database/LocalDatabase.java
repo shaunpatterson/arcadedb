@@ -1982,7 +1982,9 @@ public class LocalDatabase extends RWLockContext implements DatabaseInternal {
     schema.checkBackingTypeWrite(record.getIdentity().getBucketId(), "update a record of");
 
     try {
-      if (record instanceof MutableDocument document) {
+      // A vertex whose edge-list head was set and whose properties were never decoded holds them exactly as they were stored: there is
+      // nothing to validate or to check for lost content, and decoding them (a 1,024-float embedding among them) is what this skips
+      if (record instanceof MutableDocument document && !isEdgeListHeadOnlyWrite(record)) {
         // #10955: NEVER SAVE BACK A RECORD THAT LOST A PROPERTY IT COULD NOT DECODE
         document.checkContentIsComplete();
         document.validate();
@@ -2025,6 +2027,8 @@ public class LocalDatabase extends RWLockContext implements DatabaseInternal {
     // Known positively, not from the absence of an assignment: a list or map changed in place assigns no property either, and it
     // is content all the same.
     final boolean structural = isEdgeListWriteOnly(record);
+    // read before addUpdatedRecord() below, which clears the flag it is told by
+    final boolean headOnly = isEdgeListHeadOnlyWrite(record);
     if (!writeNow && isTransactionActive()) {
       // MARK THE RECORD FOR UPDATE IN TX AND DEFER THE SERIALIZATION AT COMMIT TIME. THIS SPEEDS UP CASES WHEN THE
       // SAME RECORDS ARE UPDATE MULTIPLE TIME INSIDE
@@ -2042,7 +2046,8 @@ public class LocalDatabase extends RWLockContext implements DatabaseInternal {
         if (!tx.addUpdatedRecord(record))
           return false;
 
-        if (record instanceof Document document) {
+        // No property of a head-only write differs from the stored ones, so no index entry does either
+        if (record instanceof Document document && !headOnly) {
           // UPDATE THE INDEX IN MEMORY BEFORE UPDATING THE PAGE
           final List<IndexInternal> indexes = indexer.getInvolvedIndexes(document);
           if (!indexes.isEmpty()) {
@@ -2185,6 +2190,15 @@ public class LocalDatabase extends RWLockContext implements DatabaseInternal {
       tx.setRollbackOnly("a before-update listener refused the update of record " + record.getIdentity()
           + ", which the transaction had already updated, and the transaction has no savepoint to take it back to");
     return false;
+  }
+
+  /**
+   * Whether the update sets an edge-list head of a vertex that never decoded its properties: they are the stored ones, so validating
+   * them, diffing the indexes on them and serializing them again would all find nothing. What {@code GraphEngine.writeEdgeListHead}
+   * writes for the first edge of a direction, on a vertex it just took from {@code modify()}.
+   */
+  private static boolean isEdgeListHeadOnlyWrite(final Record record) {
+    return record instanceof MutableVertex vertex && vertex.areEdgeListHeadsAssigned() && !vertex.arePropertiesLoaded();
   }
 
   /**

@@ -2256,6 +2256,9 @@ public class LocalDocumentType implements DocumentType {
       // Every refusal is asked above: the copy registers the new name in the dictionary, a commit of its own that a refusal after it
       // would leave behind, and on a Raft leader that page change quarantined the leader (issues #12958, #13092). Nothing below refuses
       final LocalProperty renamed = property.copyWithName(newPropertyName);
+      // The values stay under the old name (#7589) while the constraints move to the new one: refused when that would leave a stored
+      // record violating them, as declaring the same constraints over those records is (issue #12930). Asked before anything changes
+      ExistingRecordsCheck.requireRename(schema.getDatabase(), this, propertyName, renamed);
 
       properties.remove(propertyName);
       properties.put(newPropertyName, renamed);

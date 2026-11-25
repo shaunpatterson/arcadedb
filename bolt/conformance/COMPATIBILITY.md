@@ -4,15 +4,21 @@
 
 Certification status of ArcadeDB's Bolt protocol against every official Neo4j driver, per the shared conformance spec ([`spec.yaml`](spec.yaml), epic #4882). Columns are driver language by pinned version ([`driver-versions.md`](driver-versions.md)).
 
-**Last verified:** 2026-11-24 13:32 UTC ([run](https://github.com/shaunpatterson/arcadedb/actions/runs/45402947071))
+**Last verified:** 2026-11-25 12:24 UTC ([run](https://github.com/shaunpatterson/arcadedb/actions/runs/45612126809))
 
 Legend: ✅ pass, ❌ fail, ⚠️ expected-fail / known limitation, ➖ not applicable, ⚪ skipped, `·` not reported. A `·` in a listed Coverage-gaps column means no result for that driver:version.
+
+## Coverage gaps
+
+These driver:version cells produced no usable result this run and count against the badge:
+
+- empty (ran, no recognized scenarios): java:4.4.20
 
 ## connection
 
 | Scenario | java<br>4.4.20 | java<br>5.28.5 | java<br>6.2.0 | javascript<br>5.28.3 | javascript<br>6.2.0 | python<br>5.28.4 | python<br>6.1.0 | python<br>6.2.0 | csharp<br>5.26.2 | csharp<br>5.28.4 | csharp<br>6.2.1 | go<br>5.27.0 | go<br>5.28.0 | go<br>5.28.4 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **CONN-001** Connect via bolt:// scheme | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **CONN-001** Connect via bolt:// scheme | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **CONN-002** Connect via bolt+s:// with TLS required | · | · | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **CONN-003** Connect via neo4j:// routing discovery, single-node deployment | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **CONN-004** neo4j:// routing reflects actual multi-node HA cluster topology | · | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ | ⚪ |
@@ -81,7 +87,7 @@ Legend: ✅ pass, ❌ fail, ⚠️ expected-fail / known limitation, ➖ not app
 
 | Scenario | java<br>4.4.20 | java<br>5.28.5 | java<br>6.2.0 | javascript<br>5.28.3 | javascript<br>6.2.0 | python<br>5.28.4 | python<br>6.1.0 | python<br>6.2.0 | csharp<br>5.26.2 | csharp<br>5.28.4 | csharp<br>6.2.1 | go<br>5.27.0 | go<br>5.28.0 | go<br>5.28.4 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **ERR-001** Syntax error returns Neo.ClientError.Statement.SyntaxError | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **ERR-001** Syntax error returns Neo.ClientError.Statement.SyntaxError | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **ERR-002** Semantic error returns Neo.ClientError.Statement.SemanticError | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **ERR-003** Unauthenticated request returns Neo.ClientError.Security.Forbidden | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ | ➖ |
 | **ERR-004** Transient conditions surface Neo.TransientError.* codes | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -92,6 +98,6 @@ Legend: ✅ pass, ❌ fail, ⚠️ expected-fail / known limitation, ➖ not app
 
 | Scenario | java<br>4.4.20 | java<br>5.28.5 | java<br>6.2.0 | javascript<br>5.28.3 | javascript<br>6.2.0 | python<br>5.28.4 | python<br>6.1.0 | python<br>6.2.0 | csharp<br>5.26.2 | csharp<br>5.28.4 | csharp<br>6.2.1 | go<br>5.27.0 | go<br>5.28.0 | go<br>5.28.4 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **PROTO-001** Version negotiation succeeds for Bolt 4.4, 4.0, and 3.0 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **PROTO-001** Version negotiation succeeds for Bolt 4.4, 4.0, and 3.0 | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **PROTO-002** Version negotiation with a Bolt 5.x-only driver | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **PROTO-003** RESET returns the connection to a clean state mid-stream | · | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

@@ -4895,13 +4895,26 @@ public class SelectExecutionPlanner {
     // Each branch then ends with the step that gives its rows their best $score (issue #11618)
     final boolean rescore = info.flattenedWhereClause.size() > 1 && !mergeByScore && rescoresTheBranches(typez, info, context);
 
+    // An OR with a branch no index answers is one scan of the type with the whole WHERE: the branch needs the scan anyway, and
+    // planning it as a union would read the type again for every such branch, plus an index search for each of the others,
+    // only to deduplicate what the one scan returns once. Not when a branch is answered by a FULL_TEXT index: that matches by the
+    // analyzer's tokens, which the scan's own evaluation of the condition does not reproduce, so the branch stays planned on its own
+    final List<IndexSearchDescriptor> branchIndexes =
+        info.flattenedWhereClause.size() > 1 ? plainBranchIndexes(typez, info, context) : null;
+    if (branchIndexes != null && branchIndexes.contains(null)
+        && branchIndexes.stream().noneMatch(descriptor -> descriptor != null && isFullText(descriptor.index)))
+      return false;
+
+    int branchNo = 0;
     for (AndBlock block : info.flattenedWhereClause) {
+      final int thisBranch = branchNo++;
       List<BinaryCondition> indexedFunctionConditions = block.getIndexedFunctionConditions(typez, context);
 
       indexedFunctionConditions = filterIndexedFunctionsWithoutIndex(indexedFunctionConditions, info.target, context);
 
       if (indexedFunctionConditions == null || indexedFunctionConditions.isEmpty()) {
-        IndexSearchDescriptor bestIndex = findBestIndexFor(context, plannableIndexes(typez.getAllIndexes(true)), block, typez);
+        IndexSearchDescriptor bestIndex = branchIndexes != null ? branchIndexes.get(thisBranch)
+            : findBestIndexFor(context, plannableIndexes(typez.getAllIndexes(true)), block, typez);
         if (bestIndex != null) {
 
           final FetchFromIndexStep step = new FetchFromIndexStep(bestIndex.index, bestIndex.keyCondition,
@@ -5076,6 +5089,24 @@ public class SelectExecutionPlanner {
     } else {
       return false;
     }
+  }
+
+  /**
+   * The best index search of every branch of the WHERE's OR, in branch order (null for a branch no index answers), or null when a
+   * branch calls an indexed function, which the per-branch planning handles itself.
+   */
+  private List<IndexSearchDescriptor> plainBranchIndexes(final DocumentType type, final QueryPlanningInfo info,
+      final CommandContext context) {
+    final List<TypeIndex> indexes = plannableIndexes(type.getAllIndexes(true));
+    final List<IndexSearchDescriptor> result = new ArrayList<>(info.flattenedWhereClause.size());
+    for (final AndBlock block : info.flattenedWhereClause) {
+      final List<BinaryCondition> indexedFunctionConditions = filterIndexedFunctionsWithoutIndex(
+          block.getIndexedFunctionConditions(type, context), info.target, context);
+      if (indexedFunctionConditions != null && !indexedFunctionConditions.isEmpty())
+        return null;
+      result.add(indexes.isEmpty() ? null : findBestIndexFor(context, indexes, block, type));
+    }
+    return result;
   }
 
   /**
@@ -6557,7 +6588,8 @@ public class SelectExecutionPlanner {
       }
     } else {
       // Defensive, and not reachable through a SELECT today: handleTypeAsTargetWithIndexedFunction() runs first at
-      // both call sites and claims every multi-block WHERE, so an OR reaches its own per-branch planning - which
+      // both call sites and claims every multi-block WHERE whose branches all have an index or call an indexed function (an OR with a
+      // branch no index answers reaches the scan below), so an OR reaches its own per-branch planning - which
       // chains the LET into each sub-plan correctly, because that sub-plan is not empty by then. Kept because this
       // branch chains residual filters of its own, and one reading a per-record LET would be evaluated with the
       // variable unset, which is a wrong answer rather than a lost optimisation.

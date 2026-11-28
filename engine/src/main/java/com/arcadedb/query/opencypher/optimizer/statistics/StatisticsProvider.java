@@ -330,6 +330,41 @@ public class StatisticsProvider {
   }
 
   /**
+   * The number of relationships of a type one expansion reads from a vertex of {@code boundVertexLabel}: the edges of the type
+   * over the vertices of that label, so a hop out of the one hub of a label that holds every edge of the type costs what it does,
+   * where {@link #getAverageDegree} - the edges over both ends' vertices - gives a hub and a leaf the same degree (issue #13588: a tag
+   * that holds most of the interest edges, and persons with 5 interests each, both have the mean degree 10).
+   * <p>
+   * Every edge of the type is taken to leave or reach a vertex of {@code boundVertexLabel}; an undirected hop between two
+   * vertices of the same label reads each edge from both of them. Falls back to {@link #getAverageDegree} when the bound end has
+   * no label or no vertex, and is at least 1 otherwise.
+   *
+   * @param relationshipType   name of the edge type
+   * @param boundVertexLabel   label of the vertex the expansion starts from (can be null)
+   * @param farVertexLabel     label of the vertex it reaches (can be null)
+   * @param undirected         whether the hop is written without a direction
+   */
+  public double getExpansionDegree(final String relationshipType, final String boundVertexLabel, final String farVertexLabel,
+      final boolean undirected) {
+    final String cacheKey = "from:" + relationshipType + ":" + boundVertexLabel + ":" + farVertexLabel + ":" + undirected;
+    final Double cached = averageDegreeCache.get(cacheKey);
+    if (cached != null)
+      return cached;
+
+    final double degree;
+    final long bound = currentVertexTypeCount(boundVertexLabel);
+    if (bound == 0 || !(database.getSchema().getTypeOrNull(relationshipType) instanceof EdgeType))
+      degree = getAverageDegree(relationshipType, boundVertexLabel, farVertexLabel);
+    else {
+      final long edges = database.countType(relationshipType, true);
+      final double reads = undirected && boundVertexLabel.equals(farVertexLabel) ? 2.0 : 1.0;
+      degree = edges == 0 ? 0.0 : Math.max(1.0, reads * edges / bound);
+    }
+    averageDegreeCache.put(cacheKey, degree);
+    return degree;
+  }
+
+  /**
    * Calculates average degree for a relationship type.
    */
   private double calculateAverageDegree(

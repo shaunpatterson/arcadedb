@@ -18,6 +18,7 @@
  */
 package com.arcadedb.query.opencypher.optimizer.rules;
 
+import com.arcadedb.query.opencypher.ast.Direction;
 import com.arcadedb.query.opencypher.optimizer.plan.LogicalNode;
 import com.arcadedb.query.opencypher.optimizer.plan.LogicalPlan;
 import com.arcadedb.query.opencypher.optimizer.plan.LogicalRelationship;
@@ -184,7 +185,7 @@ public class JoinOrderRule implements OptimizationRule {
 
     // One endpoint bound - use ExpandAll
     // Cost depends on average degree
-    final double avgDegree = estimateAverageDegree(rel, logicalPlan);
+    final double avgDegree = estimateAverageDegree(rel, sourceIsBound, logicalPlan);
 
     if (rel.isVariableLength())
       return CostModel.saturatingMultiply(
@@ -205,11 +206,16 @@ public class JoinOrderRule implements OptimizationRule {
    * Estimates the average degree (edge count) for a relationship type.
    * Uses actual database statistics when available.
    *
-   * @param rel         the relationship
-   * @param logicalPlan the logical plan (for node label lookup)
+   * The degree is the one of the bound end the expansion starts from (issue #13588): the edges of the type over the vertices of
+   * its label, not the mean over both ends' vertices, which gives the one hub of a label and a leaf the same cost.
+   *
+   * @param rel           the relationship
+   * @param sourceIsBound whether the expansion starts from the source (otherwise from the target)
+   * @param logicalPlan   the logical plan (for node label lookup)
    * @return estimated average degree
    */
-  private double estimateAverageDegree(final LogicalRelationship rel, final LogicalPlan logicalPlan) {
+  private double estimateAverageDegree(final LogicalRelationship rel, final boolean sourceIsBound,
+      final LogicalPlan logicalPlan) {
     // Get relationship type
     final String relationshipType = rel.getFirstType();
     if (relationshipType == null) {
@@ -231,8 +237,10 @@ public class JoinOrderRule implements OptimizationRule {
       targetLabel = targetNode.getFirstLabel();
     }
 
-    // Get actual average degree from statistics
-    return statisticsProvider.getAverageDegree(relationshipType, sourceLabel, targetLabel);
+    // Get actual degree of the bound end from statistics
+    return sourceIsBound ?
+        statisticsProvider.getExpansionDegree(relationshipType, sourceLabel, targetLabel, rel.getDirection() == Direction.BOTH) :
+        statisticsProvider.getExpansionDegree(relationshipType, targetLabel, sourceLabel, rel.getDirection() == Direction.BOTH);
   }
 
   /**

@@ -24,6 +24,7 @@ import com.arcadedb.query.opencypher.procedures.db.DbAnalyticalViewCreate;
 import com.arcadedb.query.opencypher.procedures.db.DbAnalyticalViewDrop;
 import com.arcadedb.query.opencypher.procedures.db.DbAnalyticalViewList;
 import com.arcadedb.query.opencypher.procedures.db.DbAnalyticalViewRebuild;
+import com.arcadedb.query.opencypher.procedures.db.DbCreateSetVectorProperty;
 import com.arcadedb.query.opencypher.procedures.db.DbIndexFulltextQueryNodes;
 import com.arcadedb.query.opencypher.procedures.db.DbIndexFulltextQueryRelationships;
 import com.arcadedb.query.opencypher.procedures.db.DbIndexVectorQueryNodes;
@@ -410,6 +411,8 @@ public final class CypherProcedureRegistry {
 
   private static void registerDbProcedures() {
     register(new DbIndexVectorQueryNodes());
+    register(DbCreateSetVectorProperty.forNodes());
+    register(DbCreateSetVectorProperty.forRelationships());
     register(new DbIndexFulltextQueryNodes());
     register(new DbIndexFulltextQueryRelationships());
     register(new DbLabels());

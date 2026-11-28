@@ -50,6 +50,7 @@ import com.arcadedb.query.opencypher.executor.steps.QuantifiedPathStep;
 import com.arcadedb.query.opencypher.executor.steps.ShortestPathStep;
 import com.arcadedb.query.opencypher.executor.steps.UniqueKeyAnchor;
 import com.arcadedb.query.opencypher.executor.steps.ZeroLengthPathStep;
+import com.arcadedb.query.opencypher.optimizer.statistics.CostModel;
 import com.arcadedb.query.opencypher.temporal.TemporalUtil;
 import com.arcadedb.query.opencypher.optimizer.plan.PhysicalPlan;
 import com.arcadedb.index.TypeIndex;
@@ -166,7 +167,9 @@ final class MatchStepBuilder {
 
     for (int patternIndex = 0; patternIndex < pathPatterns.size(); patternIndex++) {
       // Issue #13621: a chain of fixed-length hops from an unbound node to one the row already holds is walked from the bound end
-      if (startsFromBoundLastNode(pathPatterns.get(patternIndex), stepBeforeMatch, whereClause, boundVariables, matchVariables)) {
+      // Issue #13603: so is a chain that ends on a node an index seek answers, when it starts from an unconstrained scan
+      if (startsFromBoundLastNode(pathPatterns.get(patternIndex), stepBeforeMatch, whereClause, boundVariables, matchVariables)
+          || startsFromIndexedLastNode(pathPatterns.get(patternIndex), isOptional, whereClause, boundVariables, matchVariables)) {
         if (!pathPatternsCopied) {
           pathPatterns = new ArrayList<>(pathPatterns);
           pathPatternsCopied = true;
@@ -1032,8 +1035,21 @@ final class MatchStepBuilder {
       return false;
     if (isUniquelyKeyed(first) && readsOnlyEarlierClauses(first.getProperties(), boundVariables))
       return false;
-    // Every map the reversed chain checks before it reaches the first node may read only what the row holds when the chain
-    // starts: one naming a variable of the chain (`(b {id: a.id})`, `[:R {w: a.x}]`) would be checked before that variable is bound
+    if (!reversedChainChecksReadOnlyEarlierClauses(pathPattern, boundVariables, matchVariables))
+      return false;
+    if (firstVar == null)
+      return true;
+    final BooleanExpression where = whereClause != null ? whereClause.getConditionExpression() : null;
+    return plan.extractIdFilter(whereClause, firstVar) == null && !isUniquelyKeyedByWhere(first, firstVar, where, boundVariables);
+  }
+
+  /**
+   * Whether every map the chain checks may be read when the chain is walked back to front: a property map or an inline
+   * {@code WHERE} of a hop or of a node after the first may read only what the row holds when the chain starts. One naming a
+   * variable of the chain (`(b {id: a.id})`, `[:R {w: a.x}]`) would be checked before that variable is bound.
+   */
+  private boolean reversedChainChecksReadOnlyEarlierClauses(final PathPattern pathPattern, final Set<String> boundVariables,
+      final Set<String> matchVariables) {
     final Set<String> boundBefore;
     if (matchVariables.isEmpty())
       boundBefore = boundVariables;
@@ -1049,10 +1065,97 @@ final class MatchStepBuilder {
           || !readsOnlyEarlierClauses(node.getProperties(), boundBefore))
         return false;
     }
-    if (firstVar == null)
-      return true;
+    return true;
+  }
+
+  /**
+   * Whether a chain of fixed-length hops is planned back to front because its last node is one an index seek answers (issue
+   * #13603): the first node is new to the row and nothing narrows it, so the written order scans every vertex of its labels (or
+   * every vertex) and expands each of them, repeated for every input row, to find the few that reach the node the last node's
+   * index pins. Read from that node the same chain is one seek and a walk of its relationships. This is the anchor a single
+   * {@code MATCH} gets from the optimizer when the value is a literal or a parameter, and an indexed seek is always preferred
+   * there over an unfiltered scan; here the value may be a variable an earlier clause bound ({@code UNWIND}, {@code WITH}, the
+   * variable a {@code CALL} subquery imports), which the optimizer does not plan.
+   * <p>
+   * The last node must carry one label of a vertex type, and an equality on every column of an index of it (through its inline
+   * map or the {@code WHERE} clause) whose values are literals, parameters or variables an earlier clause bound. The seek is
+   * estimated as the optimizer estimates it (one row of a unique index, a tenth of the label's vertices otherwise), and the
+   * chain is reversed only when that is fewer than the vertices the written order starts from. Every hop is typed and of a
+   * bidirectional type, so the reversed walk reads a stored incoming list. Not for an OPTIONAL MATCH, a path variable or a path
+   * mode, which bind the pattern in the order written, nor for a first node that carries what only a node step checks (an
+   * inline WHERE, dynamic labels, a parameter map, properties, an id or a WHERE predicate of its own), nor for a variable-length
+   * or quantified hop.
+   */
+  private boolean startsFromIndexedLastNode(final PathPattern pathPattern, final boolean isOptional, final WhereClause whereClause,
+      final Set<String> boundVariables, final Set<String> matchVariables) {
+    if (isOptional || pathPattern instanceof ShortestPathPattern || pathPattern.hasPathVariable() || pathPattern.getPathMode() != null
+        || pathPattern.getRelationshipCount() < 1)
+      return false;
+    for (final RelationshipPattern relationship : pathPattern.getRelationships()) {
+      if (relationship instanceof QuantifiedPathPattern || relationship.isVariableLength() || !relationship.hasTypes())
+        return false;
+      for (final String type : relationship.getTypes())
+        if (!(database.getSchema().getTypeOrNull(type) instanceof EdgeType edgeType) || !edgeType.isBidirectional())
+          return false;
+    }
+
     final BooleanExpression where = whereClause != null ? whereClause.getConditionExpression() : null;
-    return plan.extractIdFilter(whereClause, firstVar) == null && !isUniquelyKeyedByWhere(first, firstVar, where, boundVariables);
+    final NodePattern first = pathPattern.getFirstNode();
+    final String firstVar = first.getVariable();
+    if (firstVar != null && (boundVariables.contains(firstVar) || matchVariables.contains(firstVar)))
+      return false;
+    if (first.hasWhereExpression() || first.hasDynamicLabels() || first.getPropertiesParameterName() != null || first.hasProperties()
+        || (firstVar != null && (plan.extractIdFilter(whereClause, firstVar) != null
+        || !wherePinnedProperties(firstVar, where, value -> true).isEmpty())))
+      return false;
+
+    final NodePattern last = pathPattern.getLastNode();
+    final String lastVar = last.getVariable();
+    if (lastVar != null && (lastVar.equals(firstVar) || boundVariables.contains(lastVar) || matchVariables.contains(lastVar)))
+      return false;
+    if (last.hasDynamicLabels() || last.hasWhereExpression() || last.getPropertiesParameterName() != null || !last.hasLabels()
+        || last.getLabels().size() != 1 || last.isLabelDisjunction())
+      return false;
+    final String lastLabel = last.getLabels().getFirst();
+    if (!(database.getSchema().getTypeOrNull(lastLabel) instanceof VertexType lastType))
+      return false;
+    if (!readsOnlyEarlierClauses(last.getProperties(), boundVariables))
+      return false;
+
+    final Set<String> pinned = new HashSet<>();
+    if (last.hasProperties())
+      pinned.addAll(last.getProperties().keySet());
+    if (lastVar != null)
+      pinned.addAll(wherePinnedProperties(lastVar, where, value -> valueReadsOnlyEarlierClauses(value, boundVariables)));
+    if (pinned.isEmpty())
+      return false;
+    boolean unique = false;
+    boolean seekable = false;
+    for (final TypeIndex index : lastType.getAllIndexes(true)) {
+      final List<String> keys = index.isReadyForQueries() ? index.getPropertyNamesIfExactKeyLookup() : null;
+      if (keys != null && pinned.containsAll(keys)) {
+        seekable = true;
+        unique |= index.isUnique();
+      }
+    }
+    if (!seekable || !reversedChainChecksReadOnlyEarlierClauses(pathPattern, boundVariables, matchVariables))
+      return false;
+
+    // the written order scans the vertices of the first node's labels, or every vertex when it has none
+    if (!first.hasLabels())
+      return true;
+    final long seekRows;
+    final long scanRows;
+    try {
+      seekRows = unique ? 1 : (long) (database.countType(lastLabel, true) * CostModel.SELECTIVITY_EQUALITY);
+      long scanned = 0;
+      for (final DocumentType type : Labels.matchingVertexTypes(database.getSchema(), first.getLabels(), first.isLabelDisjunction()))
+        scanned += database.countType(type.getName(), false);
+      scanRows = scanned;
+    } catch (final SecurityException e) {
+      return false;
+    }
+    return seekRows < scanRows;
   }
 
   /**

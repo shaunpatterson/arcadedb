@@ -35,6 +35,7 @@ import java.util.List;
  */
 public class ShortestPathPattern extends PathPattern {
   private final boolean allPaths;
+  private final boolean selectorPrefix;
 
   /**
    * Creates a shortest path pattern.
@@ -46,8 +47,22 @@ public class ShortestPathPattern extends PathPattern {
    */
   public ShortestPathPattern(final List<NodePattern> nodes, final List<RelationshipPattern> relationships,
       final String pathVariable, final boolean allPaths) {
+    this(nodes, relationships, pathVariable, allPaths, false);
+  }
+
+  /**
+   * Creates a shortest path pattern.
+   *
+   * @param selectorPrefix true when the pattern was written with the GQL path search prefix ({@code SHORTEST 1},
+   *                       {@code ANY SHORTEST}, {@code ALL SHORTEST}) instead of {@code shortestPath()} /
+   *                       {@code allShortestPaths()}: the same search, but a WHERE of the MATCH only filters the paths it
+   *                       selected (issue #13576)
+   */
+  public ShortestPathPattern(final List<NodePattern> nodes, final List<RelationshipPattern> relationships,
+      final String pathVariable, final boolean allPaths, final boolean selectorPrefix) {
     super(nodes, relationships, pathVariable);
     this.allPaths = allPaths;
+    this.selectorPrefix = selectorPrefix;
   }
 
   /**
@@ -59,9 +74,17 @@ public class ShortestPathPattern extends PathPattern {
     return allPaths;
   }
 
+  /**
+   * Returns true when the pattern was written with the GQL path search prefix ({@code SHORTEST 1}, {@code ANY SHORTEST},
+   * {@code ALL SHORTEST}) instead of {@code shortestPath()} / {@code allShortestPaths()}.
+   */
+  public boolean isSelectorPrefix() {
+    return selectorPrefix;
+  }
+
   @Override
   public PathPattern withNodes(final List<NodePattern> newNodes) {
-    return new ShortestPathPattern(newNodes, getRelationships(), getPathVariable(), allPaths);
+    return new ShortestPathPattern(newNodes, getRelationships(), getPathVariable(), allPaths, selectorPrefix);
   }
 
   /**
@@ -79,9 +102,10 @@ public class ShortestPathPattern extends PathPattern {
     if (getPathVariable() != null) {
       sb.append(getPathVariable()).append(" = ");
     }
-    sb.append(allPaths ? "allShortestPaths(" : "shortestPath(");
-    sb.append(super.toString());
-    sb.append(")");
+    if (selectorPrefix)
+      sb.append(allPaths ? "ALL SHORTEST " : "ANY SHORTEST ").append(super.toString());
+    else
+      sb.append(allPaths ? "allShortestPaths(" : "shortestPath(").append(super.toString()).append(")");
     return sb.toString();
   }
 }

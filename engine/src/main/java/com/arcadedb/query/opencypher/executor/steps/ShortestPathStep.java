@@ -115,7 +115,9 @@ public class ShortestPathStep extends AbstractExecutionStep {
     this.targetVariable = targetVariable;
     this.pathVariable = pathVariable;
     this.pattern = pattern;
-    this.pathPredicate = pathVariable == null || pathVariable.isEmpty() ? null : pathPredicate;
+    // A MATCH ... WHERE of a SHORTEST 1 / ANY SHORTEST / ALL SHORTEST selector filters the paths the selector chose, where the
+    // WHERE of a shortestPath() restricts the search (issue #13576)
+    this.pathPredicate = pathVariable == null || pathVariable.isEmpty() || pattern.isSelectorPrefix() ? null : pathPredicate;
   }
 
   @Override
@@ -208,6 +210,11 @@ public class ShortestPathStep extends AbstractExecutionStep {
 
             final Vertex sourceVertex = (Vertex) sourceObj;
             final Vertex targetVertex = (Vertex) targetObj;
+
+            // GQL answers the shortest closed path of a node to itself, which this search does not compute
+            if (pattern.isSelectorPrefix() && sourceVertex.getIdentity().equals(targetVertex.getIdentity()))
+              throw new CommandExecutionException("a SHORTEST path search prefix from a node to itself (the shortest cycle)"
+                  + " is not supported; both ends of the pattern matched " + sourceVertex.getIdentity());
 
             // For allShortestPaths(), enumerate every path sharing the minimal length; for shortestPath()
             // (singular), keep returning just one. Reuse the same compute method for the single-path case

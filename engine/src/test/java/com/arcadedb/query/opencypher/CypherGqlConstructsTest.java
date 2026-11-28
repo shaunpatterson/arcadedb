@@ -82,8 +82,9 @@ class CypherGqlConstructsTest extends TestHelper {
 
   @Test
   void pathSearchPrefixesOtherThanAllAreRefused() {
-    for (final String prefix : new String[] { "ANY SHORTEST", "ALL SHORTEST", "SHORTEST 2", "SHORTEST 1 GROUPS", "SHORTEST GROUPS",
-        "ANY", "ANY 2", "ANY SHORTEST PATH", "SHORTEST 2 PATHS" })
+    // SHORTEST 1, ANY SHORTEST and ALL SHORTEST run as shortestPath() / allShortestPaths() (issue #13576)
+    for (final String prefix : new String[] { "SHORTEST 2", "SHORTEST 1 GROUPS", "SHORTEST GROUPS", "ANY", "ANY 2",
+        "ANY SHORTEST WALK", "SHORTEST 2 PATHS" })
       assertThatThrownBy(() -> rows("MATCH p = " + prefix + " (a:Person {name:'A'})-[:KNOWS]->+(d:Person {name:'D'}) RETURN length(p) AS l"))
           .as(prefix)
           .hasMessageContaining("path search prefix")
@@ -583,13 +584,10 @@ class CypherGqlConstructsTest extends TestHelper {
   void unsupportedConstructsInsideSubqueryBodiesAreRefused() {
     final String other = "otherGraph9940";
     final String[][] cases = {
-        // path search prefix
-        { "MATCH (a:Person {name:'A'}) WHERE EXISTS { ANY SHORTEST (a)-[:KNOWS]->+(:Person {name:'D'}) } RETURN a.name AS n", "path search prefix" },
-        { "MATCH (a:Person {name:'A'}) WHERE EXISTS { MATCH ANY SHORTEST (a)-[:KNOWS]->+(:Person {name:'D'}) } RETURN a.name AS n", "path search prefix" },
-        { "MATCH (a:Person {name:'A'}) RETURN COUNT { ANY SHORTEST (a)-[:KNOWS]->+(:Person {name:'D'}) } AS n", "path search prefix" },
-        { "MATCH (a:Person {name:'A'}) RETURN COUNT { MATCH ANY SHORTEST (a)-[:KNOWS]->+(:Person {name:'D'}) } AS n", "path search prefix" },
-        { "MATCH (a:Person {name:'A'}) RETURN COLLECT { MATCH p = ANY SHORTEST (a)-[:KNOWS]->+(:Person {name:'D'}) RETURN length(p) } AS n", "path search prefix" },
-        { "MATCH (a:Person {name:'A'}) CALL (a) { MATCH p = ANY SHORTEST (a)-[:KNOWS]->+(:Person {name:'D'}) RETURN length(p) AS l } RETURN l", "path search prefix" },
+        // path search prefix other than SHORTEST 1 / ANY SHORTEST / ALL SHORTEST (issue #13576)
+        { "MATCH (a:Person {name:'A'}) WHERE EXISTS { SHORTEST 2 (a)-[:KNOWS]->+(:Person {name:'D'}) } RETURN a.name AS n", "path search prefix" },
+        { "MATCH (a:Person {name:'A'}) RETURN COUNT { MATCH ANY (a)-[:KNOWS]->+(:Person {name:'D'}) } AS n", "path search prefix" },
+        { "MATCH (a:Person {name:'A'}) CALL (a) { MATCH p = SHORTEST 1 GROUP (a)-[:KNOWS]->+(:Person {name:'D'}) RETURN length(p) AS l } RETURN l", "path search prefix" },
         // match mode
         { "MATCH (a:Person) WHERE EXISTS { MATCH REPEATABLE ELEMENTS (a)-[:KNOWS]->() } RETURN a.name AS n", "match mode" },
         { "MATCH (a:Person) RETURN COUNT { REPEATABLE ELEMENTS (a)-[:KNOWS]->() } AS n", "match mode" },

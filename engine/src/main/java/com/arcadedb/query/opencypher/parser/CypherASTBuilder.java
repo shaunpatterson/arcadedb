@@ -1132,11 +1132,16 @@ public class CypherASTBuilder extends Cypher25ParserBaseVisitor<Object> {
     // The grammar has labeled alternatives (AllPath, AnyShortestPath, etc.) that each may contain pathMode().
     // Use getRuleContext on the base class to find PathModeContext regardless of which alternative matched.
     PathMode pathMode = null;
+    // The GQL selector prefixes SHORTEST 1 / ANY SHORTEST / ALL SHORTEST: null when the pattern has none, else whether it asks
+    // for every shortest path (ALL SHORTEST) or for one (issue #13576)
+    Boolean selectsAllShortest = null;
     if (ctx.pathPatternPrefix() != null) {
-      // Only ALL [mode] [PATHS] - every matching path, which is what a pattern returns anyway - is executed. A
-      // selective prefix (ANY SHORTEST, ALL SHORTEST, SHORTEST k [GROUPS], ANY [k]) is refused: dropping it, as the
-      // parser used to, returned every path instead of the ones it selects (issue #9940).
-      if (!(ctx.pathPatternPrefix() instanceof Cypher25Parser.AllPathContext))
+      selectsAllShortest = shortestSelector(ctx.pathPatternPrefix());
+      // ALL [mode] [PATHS] - every matching path, which is what a pattern returns anyway - is executed as is. The shortest
+      // selectors that shortestPath() / allShortestPaths() express are planned as those searches. Any other selective prefix
+      // (SHORTEST k, SHORTEST [k] GROUPS, ANY [k], a selector with a path mode) is refused: dropping it, as the parser used to,
+      // returned every path instead of the ones it selects (issue #9940).
+      if (selectsAllShortest == null && !(ctx.pathPatternPrefix() instanceof Cypher25Parser.AllPathContext))
         throw new FeatureNotImplementedException("the " + spaced(ctx.pathPatternPrefix())
             + " path search prefix is not supported; use shortestPath() or allShortestPaths() to select shortest paths");
       final Cypher25Parser.PathModeContext pm = ctx.pathPatternPrefix().getRuleContext(
@@ -1149,20 +1154,65 @@ public class CypherASTBuilder extends Cypher25ParserBaseVisitor<Object> {
     }
 
     // Visit the anonymous pattern to get the base path
-    final PathPattern basePath = visitAnonymousPattern(ctx.anonymousPattern());
+    PathPattern basePath = visitAnonymousPattern(ctx.anonymousPattern());
+
+    if (selectsAllShortest != null) {
+      checkShortestSelectorPattern(ctx.pathPatternPrefix(), basePath);
+      basePath = new ShortestPathPattern(basePath.getNodes(), basePath.getRelationships(), basePath.getPathVariable(),
+          selectsAllShortest, true);
+    }
 
     // If there's a path variable or path mode, create a new PathPattern with them
     if (pathVariable != null || pathMode != null) {
       if (basePath instanceof ShortestPathPattern) {
         final ShortestPathPattern shortestBase = (ShortestPathPattern) basePath;
         return new ShortestPathPattern(basePath.getNodes(), basePath.getRelationships(),
-            pathVariable != null ? pathVariable : basePath.getPathVariable(), shortestBase.isAllPaths());
+            pathVariable != null ? pathVariable : basePath.getPathVariable(), shortestBase.isAllPaths(),
+            shortestBase.isSelectorPrefix());
       }
       return new PathPattern(basePath.getNodes(), basePath.getRelationships(),
           pathVariable != null ? pathVariable : basePath.getPathVariable(), pathMode);
     }
 
     return basePath;
+  }
+
+  /**
+   * Reads a GQL path search prefix that {@code shortestPath()} / {@code allShortestPaths()} answer: {@code SHORTEST 1} and
+   * {@code ANY SHORTEST} select one shortest path per pair of endpoints, {@code ALL SHORTEST} every one of them, with no
+   * path mode (Neo4j refuses {@code SHORTEST 1 WALK}, and a shortest path has no repeated node or relationship anyway).
+   *
+   * @return {@code TRUE} for ALL SHORTEST, {@code FALSE} for SHORTEST 1 / ANY SHORTEST, {@code null} for any other prefix
+   */
+  private static Boolean shortestSelector(final Cypher25Parser.PathPatternPrefixContext prefix) {
+    if (prefix.getRuleContext(Cypher25Parser.PathModeContext.class, 0) != null)
+      return null;
+    if (prefix instanceof Cypher25Parser.AllShortestPathContext)
+      return Boolean.TRUE;
+    if (prefix instanceof Cypher25Parser.AnyShortestPathContext any) {
+      if (any.ANY() != null)
+        return Boolean.FALSE;
+      // SHORTEST k: only the literal 1, which is ANY SHORTEST. A larger k, or a parameter, selects more than one path
+      final Cypher25Parser.NonNegativeIntegerSpecificationContext k = any.nonNegativeIntegerSpecification();
+      return k != null && k.UNSIGNED_DECIMAL_INTEGER() != null && "1".equals(k.getText()) ? Boolean.FALSE : null;
+    }
+    return null;
+  }
+
+  /**
+   * The selector prefixes run on the shortestPath() search, which answers one variable-length relationship between two
+   * nodes that are not the same variable: a longer pattern, a fixed-length one, a minimum other than 1 or a path from a node to
+   * itself (GQL answers the shortest cycle there) is refused instead of answered differently from Neo4j (issue #13576).
+   */
+  private static void checkShortestSelectorPattern(final Cypher25Parser.PathPatternPrefixContext prefix,
+      final PathPattern pattern) {
+    final boolean supported = pattern.getRelationshipCount() == 1 && pattern.getNodes().size() == 2
+        && pattern.getRelationship(0).isVariableLength() && pattern.getRelationship(0).getEffectiveMinHops() == 1
+        && !(pattern.getFirstNode().getVariable() != null
+        && pattern.getFirstNode().getVariable().equals(pattern.getLastNode().getVariable()));
+    if (!supported)
+      throw new FeatureNotImplementedException("the " + spaced(prefix) + " path search prefix is supported on one variable-length"
+          + " relationship [*] or [*..max] between two different nodes only; use shortestPath() or allShortestPaths()");
   }
 
   public PathPattern visitAnonymousPattern(final Cypher25Parser.AnonymousPatternContext ctx) {
